@@ -35,3 +35,36 @@ enum GameStatus {
   playing,
   finished;
 }
+
+enum OpponentType {
+  human,
+  cpu;
+
+  String get displayName {
+    switch (this) {
+      case OpponentType.human:
+        return 'Human';
+      case OpponentType.cpu:
+        return 'CPU';
+    }
+  }
+}
+
+enum AiLevel {
+  level1(1, 'Beginner', 0.1),
+  level2(2, 'Novice', 0.2),
+  level3(3, 'Easy', 0.3),
+  level4(4, 'Normal', 0.4),
+  level5(5, 'Intermediate', 0.5),
+  level6(6, 'Challenging', 0.6),
+  level7(7, 'Hard', 0.7),
+  level8(8, 'Expert', 0.8),
+  level9(9, 'Master', 0.9),
+  level10(10, 'Grandmaster', 1.0);
+
+  final int level;
+  final String displayName;
+  final double strength; // 0.0 to 1.0 - affects move quality
+
+  const AiLevel(this.level, this.displayName, this.strength);
+}

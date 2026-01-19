@@ -5,10 +5,12 @@ import '../theme/app_theme.dart';
 
 class ScoreBar extends StatelessWidget {
   final GameState gameState;
+  final bool isAiThinking;
 
   const ScoreBar({
     super.key,
     required this.gameState,
+    this.isAiThinking = false,
   });
 
   @override

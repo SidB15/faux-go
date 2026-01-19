@@ -6,7 +6,12 @@ import '../providers/providers.dart';
 import '../theme/app_theme.dart';
 
 class GameControls extends ConsumerWidget {
-  const GameControls({super.key});
+  final bool enabled;
+
+  const GameControls({
+    super.key,
+    this.enabled = true,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -23,7 +28,7 @@ class GameControls extends ConsumerWidget {
           // Undo button
           Expanded(
             child: OutlinedButton.icon(
-              onPressed: gameState.canUndo
+              onPressed: enabled && gameState.canUndo
                   ? () => ref.read(gameStateProvider.notifier).undo()
                   : null,
               icon: const Icon(Icons.undo),
@@ -89,7 +94,9 @@ class GameControls extends ConsumerWidget {
           // Pass button
           Expanded(
             child: OutlinedButton.icon(
-              onPressed: () => ref.read(gameStateProvider.notifier).pass(),
+              onPressed: enabled
+                  ? () => ref.read(gameStateProvider.notifier).pass()
+                  : null,
               icon: const Icon(Icons.skip_next),
               label: const Text('Pass'),
               style: OutlinedButton.styleFrom(

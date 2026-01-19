@@ -6,7 +6,12 @@ import '../providers/providers.dart';
 import 'board_painter.dart';
 
 class GameBoard extends ConsumerStatefulWidget {
-  const GameBoard({super.key});
+  final bool enabled;
+
+  const GameBoard({
+    super.key,
+    this.enabled = true,
+  });
 
   @override
   ConsumerState<GameBoard> createState() => _GameBoardState();
@@ -62,6 +67,7 @@ class _GameBoardState extends ConsumerState<GameBoard> {
 
   void _handleTap(TapUpDetails details, GameState gameState) {
     if (gameState.status != GameStatus.playing) return;
+    if (!widget.enabled) return;
 
     final localPosition = details.localPosition;
 
