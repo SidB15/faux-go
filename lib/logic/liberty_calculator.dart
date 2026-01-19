@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart';
-
 import '../models/models.dart';
 
 class LibertyCalculator {
@@ -67,11 +65,6 @@ class LibertyCalculator {
       }
     }
 
-    if (liberties.isNotEmpty) {
-      debugPrint('Group of ${group.length} stones has ${liberties.length} liberties: $liberties');
-    } else {
-      debugPrint('Group of ${group.length} stones has NO LIBERTIES - should be captured!');
-    }
     return liberties;
   }
 

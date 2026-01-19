@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart';
-
 import '../models/models.dart';
 import 'liberty_calculator.dart';
 
@@ -76,10 +74,7 @@ class CaptureLogic {
       // Check if this group has any liberties left
       final liberties = calculator.getGroupLiberties(group);
 
-      debugPrint('Checking adjacent group at $adjacent: ${group.length} stones, ${liberties.length} liberties');
-
       if (liberties.isEmpty) {
-        debugPrint('CAPTURING group of ${group.length} stones!');
         capturedPositions.addAll(group);
       }
     }
@@ -87,7 +82,6 @@ class CaptureLogic {
     // Remove captured stones
     if (capturedPositions.isNotEmpty) {
       newBoard = newBoard.removeStones(capturedPositions);
-      debugPrint('Total captured: ${capturedPositions.length} stones');
     }
 
     // Check for suicide (placing stone with no liberties and no captures)
@@ -95,8 +89,6 @@ class CaptureLogic {
       final calculator = LibertyCalculator(newBoard);
       final ownGroup = calculator.findGroup(pos);
       final ownLiberties = calculator.getGroupLiberties(ownGroup);
-
-      debugPrint('Own group: ${ownGroup.length} stones, ${ownLiberties.length} liberties');
 
       if (ownLiberties.isEmpty) {
         return MoveResult.invalid('Suicide move is not allowed');
