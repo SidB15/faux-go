@@ -1,5 +1,5 @@
-name: simply_go
-description: "A new Flutter project."
+name: faux_go
+description: "Faux Go - A simple encirclement game inspired by Go"
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev

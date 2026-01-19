@@ -102,7 +102,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
 
     if (gameState == null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Simply GO')),
+        appBar: AppBar(title: const Text('Faux Go')),
         body: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,

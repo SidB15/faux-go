@@ -21,7 +21,7 @@ class HomeScreen extends StatelessWidget {
                   children: [
                     // Logo / Title
                     const Text(
-                      'SIMPLY GO',
+                      'FAUX GO',
                       style: TextStyle(
                         fontSize: 42,
                         fontWeight: FontWeight.bold,
