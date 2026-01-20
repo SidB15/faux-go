@@ -876,6 +876,10 @@ class AiEngine {
     // 2. Proximity to opponent's last move (keeps game focused) - always important
     score += _evaluateProximityToOpponent(board, pos, opponentLastMove);
 
+    // 2.5 BLOCKING: Bonus for blocking opponent's expansion direction
+    // If opponent just placed, we should block their natural extension
+    score += _evaluateBlockingExpansion(board, pos, aiColor, opponentLastMove) * 25;
+
     // 9. Connection bonus (connect own groups) - simple, always useful
     score += _evaluateConnection(board, pos, aiColor) * 5;
 
@@ -1620,6 +1624,110 @@ class AiEngine {
     }
 
     return penalty;
+  }
+
+  /// Evaluate blocking opponent's expansion direction
+  /// When opponent places a stone, they're likely trying to extend in a direction
+  /// We should place stones that block their natural expansion path
+  double _evaluateBlockingExpansion(Board board, Position pos, StoneColor aiColor, Position? opponentLastMove) {
+    if (opponentLastMove == null) return 0;
+
+    final opponentColor = aiColor.opponent;
+    double blockingScore = 0;
+
+    // Find the direction opponent is expanding (from their previous stones to their last move)
+    // Look for opponent stones adjacent to their last move
+    final expansionDirections = <Position>[];
+
+    for (final adj in opponentLastMove.adjacentPositions) {
+      if (!board.isValidPosition(adj)) continue;
+      if (board.getStoneAt(adj) == opponentColor) {
+        // Opponent has a stone here - the expansion direction is AWAY from this stone
+        // Direction = lastMove - adjacentStone (normalized)
+        final dx = opponentLastMove.x - adj.x;
+        final dy = opponentLastMove.y - adj.y;
+        expansionDirections.add(Position(dx, dy));
+      }
+    }
+
+    if (expansionDirections.isEmpty) {
+      // No adjacent opponent stones - this might be a new group
+      // In this case, prefer positions that are directly adjacent to opponent's last move
+      // to contest the space
+      final dx = (pos.x - opponentLastMove.x).abs();
+      final dy = (pos.y - opponentLastMove.y).abs();
+      if (dx <= 1 && dy <= 1 && (dx + dy) > 0) {
+        blockingScore += 2; // Directly adjacent to opponent's new stone
+      }
+      return blockingScore;
+    }
+
+    // Check if our move blocks the opponent's expansion direction
+    for (final dir in expansionDirections) {
+      // The "blocking position" is where opponent would naturally extend next
+      // That's: opponentLastMove + direction
+      final naturalExtension = Position(
+        opponentLastMove.x + dir.x,
+        opponentLastMove.y + dir.y,
+      );
+
+      // If we're placing at the natural extension point, big bonus!
+      if (pos == naturalExtension) {
+        blockingScore += 4; // Directly blocking their expansion
+      }
+
+      // If we're placing adjacent to the natural extension, still good
+      final dx = (pos.x - naturalExtension.x).abs();
+      final dy = (pos.y - naturalExtension.y).abs();
+      if (dx <= 1 && dy <= 1 && (dx + dy) > 0) {
+        blockingScore += 2; // Near their expansion path
+      }
+
+      // Also check if we're blocking the continuation of the line
+      // E.g., if opponent is building a line, block further along it
+      final furtherExtension = Position(
+        opponentLastMove.x + dir.x * 2,
+        opponentLastMove.y + dir.y * 2,
+      );
+      if (board.isValidPosition(furtherExtension) && board.isEmpty(furtherExtension)) {
+        if (pos == furtherExtension) {
+          blockingScore += 3; // Blocking further extension
+        }
+      }
+    }
+
+    // ADDITIONAL: Check if opponent is building toward edge (dangerous for us)
+    // If their expansion leads toward cutting off our escape, prioritize blocking
+    for (final dir in expansionDirections) {
+      // Check if this direction leads toward us
+      final towardUs = Position(
+        opponentLastMove.x + dir.x,
+        opponentLastMove.y + dir.y,
+      );
+
+      // See if there are any AI stones in this direction
+      for (int dist = 1; dist <= 3; dist++) {
+        final checkPos = Position(
+          opponentLastMove.x + dir.x * dist,
+          opponentLastMove.y + dir.y * dist,
+        );
+        if (!board.isValidPosition(checkPos)) break;
+
+        if (board.getStoneAt(checkPos) == aiColor) {
+          // Opponent is expanding toward our stones!
+          // Blocking this is important
+          if (pos == towardUs) {
+            blockingScore += 3; // Critical - blocking attack toward our group
+          }
+          break;
+        }
+        if (board.getStoneAt(checkPos) == opponentColor) {
+          break; // Their stone - stop looking
+        }
+      }
+    }
+
+    return blockingScore;
   }
 
   /// Evaluate center bonus (prefer center over edges)
