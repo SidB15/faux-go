@@ -4,13 +4,20 @@ import 'stone.dart';
 class Board {
   static const int defaultSize = 48;
 
+  /// Global counter for unique board versions (avoids expensive equality checks)
+  static int _versionCounter = 0;
+
   final int size;
   final Map<Position, StoneColor> _stones;
+
+  /// Unique version ID for fast equality/change detection
+  final int version;
 
   Board({
     this.size = defaultSize,
     Map<Position, StoneColor>? stones,
-  }) : _stones = stones ?? {};
+  })  : _stones = stones ?? {},
+        version = ++_versionCounter;
 
   /// Get all stones on the board
   Map<Position, StoneColor> get stones => Map.unmodifiable(_stones);
@@ -70,14 +77,11 @@ class Board {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
     if (other is! Board) return false;
-    if (other.size != size) return false;
-    if (other._stones.length != _stones.length) return false;
-    for (final entry in _stones.entries) {
-      if (other._stones[entry.key] != entry.value) return false;
-    }
-    return true;
+    // Fast path: different versions means different boards
+    // (each new Board gets a unique version)
+    return version == other.version;
   }
 
   @override
-  int get hashCode => Object.hash(size, Object.hashAll(_stones.entries));
+  int get hashCode => version;
 }

@@ -1,4 +1,5 @@
 import 'board.dart';
+import 'enclosure.dart';
 import 'game_enums.dart';
 import 'game_settings.dart';
 import 'position.dart';
@@ -16,6 +17,7 @@ class GameState {
   final StoneColor? winner;
   final List<Board> history;
   final int consecutivePasses;
+  final List<Enclosure> enclosures;
 
   const GameState({
     required this.settings,
@@ -29,6 +31,7 @@ class GameState {
     this.winner,
     this.history = const [],
     this.consecutivePasses = 0,
+    this.enclosures = const [],
   });
 
   /// Create initial game state
@@ -59,6 +62,21 @@ class GameState {
     }
   }
 
+  /// Check if a position is inside any opponent's enclosure
+  bool isInsideOpponentEnclosure(Position pos, StoneColor player) {
+    for (final enclosure in enclosures) {
+      if (enclosure.owner != player && enclosure.containsPosition(pos)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Get all enclosures owned by a specific player
+  List<Enclosure> getEnclosuresFor(StoneColor color) {
+    return enclosures.where((e) => e.owner == color).toList();
+  }
+
   GameState copyWith({
     GameSettings? settings,
     Board? board,
@@ -73,6 +91,7 @@ class GameState {
     bool clearWinner = false,
     List<Board>? history,
     int? consecutivePasses,
+    List<Enclosure>? enclosures,
   }) {
     return GameState(
       settings: settings ?? this.settings,
@@ -86,6 +105,7 @@ class GameState {
       winner: clearWinner ? null : (winner ?? this.winner),
       history: history ?? this.history,
       consecutivePasses: consecutivePasses ?? this.consecutivePasses,
+      enclosures: enclosures ?? this.enclosures,
     );
   }
 }

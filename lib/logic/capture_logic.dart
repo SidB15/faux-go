@@ -4,10 +4,12 @@ class CaptureResult {
   final Board newBoard;
   final Set<Position> capturedPositions;
   final int captureCount;
+  final List<Enclosure> newEnclosures;
 
   CaptureResult({
     required this.newBoard,
     required this.capturedPositions,
+    this.newEnclosures = const [],
   }) : captureCount = capturedPositions.length;
 
   bool get hasCaptured => capturedPositions.isNotEmpty;
@@ -35,7 +37,13 @@ class MoveResult {
 
 class CaptureLogic {
   /// Process a move: place stone, check for encirclement captures
-  static MoveResult processMove(Board board, Position pos, StoneColor color) {
+  /// Also checks if position is inside opponent's fort (enclosure)
+  static MoveResult processMove(
+    Board board,
+    Position pos,
+    StoneColor color, {
+    List<Enclosure> existingEnclosures = const [],
+  }) {
     // Check if position is valid
     if (!board.isValidPosition(pos)) {
       return MoveResult.invalid('Position is outside the board');
@@ -46,23 +54,30 @@ class CaptureLogic {
       return MoveResult.invalid('Position is already occupied');
     }
 
+    // Check if position is inside opponent's enclosure (fort)
+    for (final enclosure in existingEnclosures) {
+      if (enclosure.owner != color && enclosure.containsPosition(pos)) {
+        return MoveResult.invalid('Cannot place stone inside opponent\'s fort');
+      }
+    }
+
     // Place the stone
     Board newBoard = board.placeStone(pos, color);
 
-    // Check for encirclement captures
-    // Find all opponent stones that are now enclosed by the player's stones
-    final capturedPositions = _findEnclosedStones(newBoard, color.opponent);
+    // Check for encirclement captures and get enclosure info
+    final captureInfo = _findEnclosedStonesWithWalls(newBoard, color.opponent, color);
 
     // Remove captured stones
-    if (capturedPositions.isNotEmpty) {
-      newBoard = newBoard.removeStones(capturedPositions);
+    if (captureInfo.capturedPositions.isNotEmpty) {
+      newBoard = newBoard.removeStones(captureInfo.capturedPositions);
     }
 
     return MoveResult.valid(
       board: newBoard,
       capture: CaptureResult(
         newBoard: newBoard,
-        capturedPositions: capturedPositions,
+        capturedPositions: captureInfo.capturedPositions,
+        newEnclosures: captureInfo.newEnclosures,
       ),
     );
   }
@@ -70,9 +85,15 @@ class CaptureLogic {
   /// Find all stones of the given color that are enclosed (cannot reach the board edge)
   /// A stone is enclosed if it cannot reach the board edge through empty spaces
   /// or through its own color stones
-  static Set<Position> _findEnclosedStones(Board board, StoneColor targetColor) {
+  /// Also returns the wall positions (opponent stones that form the encirclement)
+  static _CaptureInfo _findEnclosedStonesWithWalls(
+    Board board,
+    StoneColor targetColor,
+    StoneColor capturingColor,
+  ) {
     final enclosed = <Position>{};
     final checkedRegions = <Position>{};
+    final newEnclosures = <Enclosure>[];
 
     // Check each stone of the target color
     for (int x = 0; x < board.size; x++) {
@@ -83,33 +104,48 @@ class CaptureLogic {
 
         // Find the region containing this stone (target color stones + empty spaces)
         // and check if it can reach the board edge
-        final regionResult = _findRegionAndCheckEscape(board, pos, targetColor);
+        final regionResult = _findRegionAndCheckEscapeWithWalls(board, pos, targetColor);
 
         checkedRegions.addAll(regionResult.region);
 
         if (!regionResult.canEscape) {
-          // All target color stones in this region are captured
+          // Collect captured positions
+          final capturedInRegion = <Position>{};
           for (final regionPos in regionResult.region) {
             if (board.getStoneAt(regionPos) == targetColor) {
               enclosed.add(regionPos);
+              capturedInRegion.add(regionPos);
             }
+          }
+
+          // Create enclosure with wall positions
+          if (capturedInRegion.isNotEmpty && regionResult.wallPositions.isNotEmpty) {
+            newEnclosures.add(Enclosure(
+              owner: capturingColor,
+              wallPositions: regionResult.wallPositions,
+              interiorPositions: regionResult.region,
+            ));
           }
         }
       }
     }
 
-    return enclosed;
+    return _CaptureInfo(
+      capturedPositions: enclosed,
+      newEnclosures: newEnclosures,
+    );
   }
 
   /// Find a region starting from a target stone and check if it can escape
-  /// A region includes the target color stones and any empty spaces they can reach
-  /// The region can escape if any empty space in it touches the board edge
-  static _RegionResult _findRegionAndCheckEscape(
+  /// Also tracks wall positions (opponent stones forming the encirclement)
+  /// OPTIMIZED: Early termination once escape is found
+  static _RegionResultWithWalls _findRegionAndCheckEscapeWithWalls(
     Board board,
     Position startPos,
     StoneColor targetColor,
   ) {
     final region = <Position>{};
+    final wallPositions = <Position>{};
     final toVisit = <Position>[startPos];
     bool canEscape = false;
 
@@ -123,7 +159,11 @@ class CaptureLogic {
 
       // We can traverse through target color stones and empty spaces
       // We cannot traverse through opponent stones (they form the encirclement)
-      if (stone != null && stone != targetColor) continue;
+      if (stone != null && stone != targetColor) {
+        // This is an opponent stone - it's part of the wall
+        wallPositions.add(current);
+        continue;
+      }
 
       region.add(current);
 
@@ -136,14 +176,27 @@ class CaptureLogic {
       }
 
       // Add adjacent positions to visit
+      // If we already found escape, only follow target color stones (skip empty)
       for (final adjacent in current.adjacentPositions) {
         if (!region.contains(adjacent)) {
-          toVisit.add(adjacent);
+          if (canEscape) {
+            // Only continue through stones of target color to mark region
+            final adjStone = board.getStoneAt(adjacent);
+            if (adjStone == targetColor) {
+              toVisit.add(adjacent);
+            }
+          } else {
+            toVisit.add(adjacent);
+          }
         }
       }
     }
 
-    return _RegionResult(region: region, canEscape: canEscape);
+    return _RegionResultWithWalls(
+      region: region,
+      canEscape: canEscape,
+      wallPositions: wallPositions,
+    );
   }
 
   /// Check if a position is on the edge of the board
@@ -160,9 +213,24 @@ class CaptureLogic {
   }
 }
 
-class _RegionResult {
+class _RegionResultWithWalls {
   final Set<Position> region;
   final bool canEscape;
+  final Set<Position> wallPositions;
 
-  _RegionResult({required this.region, required this.canEscape});
+  _RegionResultWithWalls({
+    required this.region,
+    required this.canEscape,
+    required this.wallPositions,
+  });
+}
+
+class _CaptureInfo {
+  final Set<Position> capturedPositions;
+  final List<Enclosure> newEnclosures;
+
+  _CaptureInfo({
+    required this.capturedPositions,
+    required this.newEnclosures,
+  });
 }

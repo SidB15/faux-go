@@ -10,22 +10,42 @@ class BannerAdWidget extends StatefulWidget {
   State<BannerAdWidget> createState() => _BannerAdWidgetState();
 }
 
-class _BannerAdWidgetState extends State<BannerAdWidget> {
+class _BannerAdWidgetState extends State<BannerAdWidget> with WidgetsBindingObserver {
   BannerAd? _bannerAd;
   bool _isAdLoaded = false;
+  bool _isPaused = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadAd();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Pause/resume ad to prevent ImageReader buffer issues
+    if (state == AppLifecycleState.paused) {
+      _isPaused = true;
+    } else if (state == AppLifecycleState.resumed) {
+      _isPaused = false;
+      // Reload ad if it was disposed
+      if (_bannerAd == null && mounted) {
+        _loadAd();
+      }
+    }
+  }
+
   void _loadAd() {
+    if (_isPaused) return;
+
     _bannerAd = AdService().createBannerAd(
       onAdLoaded: (ad) {
-        setState(() {
-          _isAdLoaded = true;
-        });
+        if (mounted && !_isPaused) {
+          setState(() {
+            _isAdLoaded = true;
+          });
+        }
       },
       onAdFailedToLoad: (ad, error) {
         debugPrint('Banner ad failed to load: $error');
@@ -37,6 +57,7 @@ class _BannerAdWidgetState extends State<BannerAdWidget> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _bannerAd?.dispose();
     super.dispose();
   }

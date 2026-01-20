@@ -21,6 +21,9 @@ final gameCountProvider = StateProvider<int>((ref) => 0);
 class GameNotifier extends StateNotifier<GameState?> {
   GameNotifier() : super(null);
 
+  /// Maximum number of undo states to keep (prevents memory bloat)
+  static const int _maxHistorySize = 50;
+
   /// Start a new game with the given settings
   void startGame(GameSettings settings) {
     state = GameState.initial(settings);
@@ -37,6 +40,7 @@ class GameNotifier extends StateNotifier<GameState?> {
       currentState.board,
       pos,
       currentState.currentPlayer,
+      existingEnclosures: currentState.enclosures,
     );
 
     if (!result.isValid) {
@@ -58,6 +62,22 @@ class GameNotifier extends StateNotifier<GameState?> {
 
     debugPrint('Black captures: $newBlackCaptures, White captures: $newWhiteCaptures');
 
+    // Limit history size to prevent memory bloat
+    List<Board> newHistory;
+    if (currentState.history.length >= _maxHistorySize) {
+      // Drop oldest entries, keep most recent ones
+      newHistory = [...currentState.history.skip(1), currentState.board];
+    } else {
+      newHistory = [...currentState.history, currentState.board];
+    }
+
+    // Update enclosures - add new ones from this capture
+    final newEnclosures = [...currentState.enclosures];
+    if (result.captureResult != null && result.captureResult!.newEnclosures.isNotEmpty) {
+      newEnclosures.addAll(result.captureResult!.newEnclosures);
+      debugPrint('New enclosures created: ${result.captureResult!.newEnclosures.length}');
+    }
+
     // Create new state
     var newState = currentState.copyWith(
       board: result.newBoard,
@@ -66,8 +86,9 @@ class GameNotifier extends StateNotifier<GameState?> {
       blackCaptures: newBlackCaptures,
       whiteCaptures: newWhiteCaptures,
       lastMove: pos,
-      history: [...currentState.history, currentState.board],
+      history: newHistory,
       consecutivePasses: 0,
+      enclosures: newEnclosures,
     );
 
     // Check win condition

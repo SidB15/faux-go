@@ -54,10 +54,15 @@ class _GameScreenState extends ConsumerState<GameScreen> {
 
     if (!mounted) return;
 
-    final move = _aiEngine.calculateMove(
+    // Use async version to run AI calculation in isolate (prevents ANR)
+    // Pass opponent's last move so AI responds nearby
+    // Pass enclosures so AI respects fort boundaries
+    final move = await _aiEngine.calculateMoveAsync(
       gameState.board,
       StoneColor.white,
       settings.aiLevel,
+      opponentLastMove: gameState.lastMove,
+      enclosures: gameState.enclosures,
     );
 
     if (move != null) {
@@ -123,10 +128,11 @@ class _GameScreenState extends ConsumerState<GameScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Score bar at top
+            // Score bar at top with menu
             ScoreBar(
               gameState: gameState,
               isAiThinking: _isAiThinking,
+              onMenuPressed: () => showGameMenu(context, ref),
             ),
 
             // Game board (expandable)

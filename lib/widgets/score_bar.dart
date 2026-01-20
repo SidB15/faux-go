@@ -6,17 +6,19 @@ import '../theme/app_theme.dart';
 class ScoreBar extends StatelessWidget {
   final GameState gameState;
   final bool isAiThinking;
+  final VoidCallback? onMenuPressed;
 
   const ScoreBar({
     super.key,
     required this.gameState,
     this.isAiThinking = false,
+    this.onMenuPressed,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       decoration: BoxDecoration(
         color: AppTheme.primaryColor,
         boxShadow: [
@@ -28,31 +30,53 @@ class ScoreBar extends StatelessWidget {
         ],
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Black score
-          _buildScoreItem(
-            color: StoneColor.black,
-            captures: gameState.blackCaptures,
-            isCurrentPlayer: gameState.currentPlayer == StoneColor.black,
+          // Menu button on left
+          IconButton(
+            onPressed: onMenuPressed,
+            icon: const Icon(Icons.menu, color: Colors.white),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
           ),
 
-          // Progress indicator
-          Text(
-            gameState.progressText,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
+          // Scores and progress centered
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Black score
+                _buildScoreItem(
+                  color: StoneColor.black,
+                  captures: gameState.blackCaptures,
+                  isCurrentPlayer: gameState.currentPlayer == StoneColor.black,
+                ),
+
+                const SizedBox(width: 16),
+
+                // Progress indicator
+                Text(
+                  gameState.progressText,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+
+                const SizedBox(width: 16),
+
+                // White score
+                _buildScoreItem(
+                  color: StoneColor.white,
+                  captures: gameState.whiteCaptures,
+                  isCurrentPlayer: gameState.currentPlayer == StoneColor.white,
+                ),
+              ],
             ),
           ),
 
-          // White score
-          _buildScoreItem(
-            color: StoneColor.white,
-            captures: gameState.whiteCaptures,
-            isCurrentPlayer: gameState.currentPlayer == StoneColor.white,
-          ),
+          // Spacer to balance menu button
+          const SizedBox(width: 40),
         ],
       ),
     );

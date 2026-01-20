@@ -41,8 +41,8 @@ dependencies:
   # Routing
   go_router: ^14.2.0
 
-  # Ads
-  google_mobile_ads: ^5.1.0
+  # Ads - use latest to fix ImageReader buffer warnings
+  google_mobile_ads: ^5.3.0
 
 dev_dependencies:
   flutter_test:

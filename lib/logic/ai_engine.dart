@@ -1,16 +1,52 @@
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
+
 import '../models/models.dart';
 import 'capture_logic.dart';
 import 'liberty_calculator.dart';
+
+/// Data class for passing AI calculation parameters to isolate
+class _AiCalculationParams {
+  final Board board;
+  final StoneColor aiColor;
+  final AiLevel level;
+  final Position? opponentLastMove;
+  final List<Enclosure> enclosures;
+
+  _AiCalculationParams(this.board, this.aiColor, this.level, this.opponentLastMove, this.enclosures);
+}
+
+/// Top-level function for compute() - must be static/top-level
+Position? _calculateMoveIsolate(_AiCalculationParams params) {
+  final engine = AiEngine._internal();
+  return engine._calculateMoveSync(params.board, params.aiColor, params.level, params.opponentLastMove, params.enclosures);
+}
 
 /// AI Engine for Go game with 10 difficulty levels
 class AiEngine {
   final Random _random = Random();
 
-  /// Calculate the best move for the AI based on difficulty level
-  Position? calculateMove(Board board, StoneColor aiColor, AiLevel level) {
-    final validMoves = _getValidMoves(board, aiColor);
+  AiEngine();
+
+  /// Internal constructor for isolate use
+  AiEngine._internal();
+
+  /// Calculate the best move for the AI based on difficulty level (async, runs in isolate)
+  /// [opponentLastMove] is used to focus AI moves near the opponent's last play
+  /// [enclosures] prevents AI from placing inside opponent's forts
+  Future<Position?> calculateMoveAsync(Board board, StoneColor aiColor, AiLevel level, {Position? opponentLastMove, List<Enclosure> enclosures = const []}) async {
+    return compute(_calculateMoveIsolate, _AiCalculationParams(board, aiColor, level, opponentLastMove, enclosures));
+  }
+
+  /// Synchronous version for internal use
+  Position? calculateMove(Board board, StoneColor aiColor, AiLevel level, {Position? opponentLastMove, List<Enclosure> enclosures = const []}) {
+    return _calculateMoveSync(board, aiColor, level, opponentLastMove, enclosures);
+  }
+
+  /// Internal synchronous calculation
+  Position? _calculateMoveSync(Board board, StoneColor aiColor, AiLevel level, Position? opponentLastMove, List<Enclosure> enclosures) {
+    final validMoves = _getValidMoves(board, aiColor, enclosures);
 
     if (validMoves.isEmpty) {
       return null; // AI should pass
@@ -19,7 +55,7 @@ class AiEngine {
     // Score all valid moves
     final scoredMoves = <_ScoredMove>[];
     for (final pos in validMoves) {
-      final score = _evaluateMove(board, pos, aiColor, level);
+      final score = _evaluateMove(board, pos, aiColor, level, opponentLastMove, enclosures);
       scoredMoves.add(_ScoredMove(pos, score));
     }
 
@@ -31,29 +67,82 @@ class AiEngine {
     return _selectMoveByLevel(scoredMoves, level);
   }
 
-  /// Get all valid move positions
-  List<Position> _getValidMoves(Board board, StoneColor color) {
+  /// Get valid move positions - optimized to focus on relevant areas
+  /// Instead of checking all 2304 positions, only check near existing stones
+  /// Also filters out positions inside opponent's enclosures (forts)
+  List<Position> _getValidMoves(Board board, StoneColor color, List<Enclosure> enclosures) {
     final validMoves = <Position>[];
+    final candidatePositions = <Position>{};
 
-    for (int x = 0; x < board.size; x++) {
-      for (int y = 0; y < board.size; y++) {
-        final pos = Position(x, y);
-        if (CaptureLogic.isValidMove(board, pos, color)) {
-          validMoves.add(pos);
+    // If board is empty or nearly empty, use strategic starting positions
+    if (board.stones.length < 4) {
+      // Start with center area and star points
+      final center = board.size ~/ 2;
+      for (int dx = -3; dx <= 3; dx++) {
+        for (int dy = -3; dy <= 3; dy++) {
+          candidatePositions.add(Position(center + dx, center + dy));
         }
+      }
+      // Add star points
+      for (int x in [6, 24, 42]) {
+        for (int y in [6, 24, 42]) {
+          if (x < board.size && y < board.size) {
+            candidatePositions.add(Position(x, y));
+          }
+        }
+      }
+    } else {
+      // Focus on positions near existing stones (within radius of 4)
+      const searchRadius = 4;
+      for (final entry in board.stones.entries) {
+        final stonePos = entry.key;
+        for (int dx = -searchRadius; dx <= searchRadius; dx++) {
+          for (int dy = -searchRadius; dy <= searchRadius; dy++) {
+            final pos = Position(stonePos.x + dx, stonePos.y + dy);
+            if (board.isValidPosition(pos)) {
+              candidatePositions.add(pos);
+            }
+          }
+        }
+      }
+    }
+
+    // Only validate the candidate positions (much smaller set)
+    // Also check that position is not inside opponent's enclosure
+    for (final pos in candidatePositions) {
+      if (board.isEmpty(pos) && _isValidMoveQuick(board, pos, color, enclosures)) {
+        validMoves.add(pos);
       }
     }
 
     return validMoves;
   }
 
+  /// Quick move validation - checks if position is empty and not inside opponent's enclosure
+  /// Full capture simulation happens only during scoring
+  bool _isValidMoveQuick(Board board, Position pos, StoneColor color, List<Enclosure> enclosures) {
+    // Basic validation: position must be empty and on board
+    if (!board.isValidPosition(pos) || !board.isEmpty(pos)) {
+      return false;
+    }
+    // Check if position is inside opponent's enclosure (fort)
+    for (final enclosure in enclosures) {
+      if (enclosure.owner != color && enclosure.containsPosition(pos)) {
+        return false;
+      }
+    }
+    // For now, accept all empty positions in candidate set
+    // The full processMove in _evaluateMove will catch any invalid moves
+    return true;
+  }
+
   /// Evaluate a move and return a score
   double _evaluateMove(
-      Board board, Position pos, StoneColor aiColor, AiLevel level) {
+      Board board, Position pos, StoneColor aiColor, AiLevel level, Position? opponentLastMove, List<Enclosure> enclosures) {
     double score = 0.0;
 
     // Simulate placing the stone
-    final result = CaptureLogic.processMove(board, pos, aiColor);
+    final result = CaptureLogic.processMove(board, pos, aiColor, existingEnclosures: enclosures);
     if (!result.isValid) return -1000; // Invalid move
 
     final newBoard = result.newBoard!;
@@ -62,25 +151,83 @@ class AiEngine {
     // 1. Capture bonus (highest priority)
     score += capturedCount * 100;
 
-    // 2. Threaten captures (stones with few liberties)
+    // 2. Proximity to opponent's last move (HIGH PRIORITY - keeps game focused)
+    score += _evaluateProximityToOpponent(board, pos, opponentLastMove) * 25;
+
+    // 3. Threaten captures (stones with few liberties)
     score += _evaluateThreats(newBoard, pos, aiColor) * 20;
 
-    // 3. Defend own groups (play near own stones with few liberties)
+    // 4. Defend own groups (play near own stones with few liberties)
     score += _evaluateDefense(board, pos, aiColor) * 15;
 
-    // 4. Expand territory (prefer moves near own stones)
+    // 5. Respond to opponent stones nearby (contest their territory)
+    score += _evaluateContestOpponent(board, pos, aiColor) * 12;
+
+    // 6. Expand territory (prefer moves near own stones)
     score += _evaluateExpansion(board, pos, aiColor) * 5;
 
-    // 5. Avoid edges early game (center is more valuable)
+    // 7. Avoid edges early game (center is more valuable)
     score += _evaluateCenterBonus(board, pos) * 2;
 
-    // 6. Avoid self-atari (putting own stones in danger)
+    // 8. Avoid self-atari (putting own stones in danger)
     score -= _evaluateSelfAtari(newBoard, pos, aiColor) * 30;
 
-    // 7. Connection bonus (connect own groups)
+    // 9. Connection bonus (connect own groups)
     score += _evaluateConnection(board, pos, aiColor) * 10;
 
     return score;
+  }
+
+  /// Evaluate proximity to opponent's last move - AI should respond nearby
+  double _evaluateProximityToOpponent(Board board, Position pos, Position? opponentLastMove) {
+    if (opponentLastMove == null) return 0;
+
+    // Calculate Manhattan distance to opponent's last move
+    final dx = (pos.x - opponentLastMove.x).abs();
+    final dy = (pos.y - opponentLastMove.y).abs();
+    final distance = dx + dy;
+
+    // Strong bonus for moves very close to opponent's last move
+    if (distance <= 2) {
+      return 10; // Very close - high priority
+    } else if (distance <= 4) {
+      return 7; // Close - good response
+    } else if (distance <= 6) {
+      return 4; // Moderate distance
+    } else if (distance <= 10) {
+      return 2; // Still relevant
+    } else {
+      return 0; // Too far - no bonus
+    }
+  }
+
+  /// Evaluate moves that contest opponent's territory/stones
+  double _evaluateContestOpponent(Board board, Position pos, StoneColor aiColor) {
+    double contestScore = 0;
+    final opponentColor = aiColor.opponent;
+
+    // Check for opponent stones within a radius of 5
+    for (int dx = -5; dx <= 5; dx++) {
+      for (int dy = -5; dy <= 5; dy++) {
+        if (dx == 0 && dy == 0) continue;
+        final nearPos = Position(pos.x + dx, pos.y + dy);
+        if (!board.isValidPosition(nearPos)) continue;
+
+        if (board.getStoneAt(nearPos) == opponentColor) {
+          final distance = dx.abs() + dy.abs();
+          // Bonus for being near opponent stones (to contest them)
+          if (distance <= 2) {
+            contestScore += 3; // Very close - direct contest
+          } else if (distance <= 4) {
+            contestScore += 1.5; // Nearby - indirect pressure
+          } else {
+            contestScore += 0.5; // In the area
+          }
+        }
+      }
+    }
+
+    return contestScore;
   }
 
   /// Evaluate threats created by this move
