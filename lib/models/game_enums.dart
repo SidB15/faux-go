@@ -37,15 +37,15 @@ enum GameStatus {
 }
 
 enum OpponentType {
-  human,
-  cpu;
+  cpu,
+  human;
 
   String get displayName {
     switch (this) {
-      case OpponentType.human:
-        return 'Human';
       case OpponentType.cpu:
         return 'CPU';
+      case OpponentType.human:
+        return 'Human';
     }
   }
 }

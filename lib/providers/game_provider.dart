@@ -24,13 +24,18 @@ class GameNotifier extends StateNotifier<GameState?> {
   /// Maximum number of undo states to keep (prevents memory bloat)
   static const int _maxHistorySize = 50;
 
+  /// Game logger instance
+  final GameLogger _logger = GameLogger();
+
   /// Start a new game with the given settings
   void startGame(GameSettings settings) {
     state = GameState.initial(settings);
+    _logger.startGame(settings);
   }
 
   /// Place a stone at the given position
-  bool placeStone(Position pos) {
+  /// [isAiMove] indicates if this move was made by the AI (for logging)
+  bool placeStone(Position pos, {bool isAiMove = false}) {
     if (state == null || state!.status != GameStatus.playing) {
       return false;
     }
@@ -62,6 +67,20 @@ class GameNotifier extends StateNotifier<GameState?> {
 
     debugPrint('Black captures: $newBlackCaptures, White captures: $newWhiteCaptures');
 
+    // Log the move
+    final enclosuresCreated = result.captureResult?.newEnclosures.length ?? 0;
+    _logger.logMove(
+      moveNumber: currentState.moveCount + 1,
+      player: currentState.currentPlayer,
+      position: pos,
+      capturedCount: capturedCount,
+      blackTotalCaptures: newBlackCaptures,
+      whiteTotalCaptures: newWhiteCaptures,
+      enclosuresCreated: enclosuresCreated,
+      isAiMove: isAiMove,
+      board: result.newBoard!,
+    );
+
     // Limit history size to prevent memory bloat
     List<Board> newHistory;
     if (currentState.history.length >= _maxHistorySize) {
@@ -78,6 +97,33 @@ class GameNotifier extends StateNotifier<GameState?> {
       debugPrint('New enclosures created: ${result.captureResult!.newEnclosures.length}');
     }
 
+    // Handle ghost stones for captured pieces
+    // Ghosts persist until the same player moves again (full turn cycle)
+    final newCapturedPositions = result.captureResult?.capturedPositions ?? const <Position>{};
+    final hasCapturedThisTurn = newCapturedPositions.isNotEmpty;
+
+    // Determine what ghost positions to show
+    Set<Position> ghostPositions;
+    StoneColor? ghostColor;
+    StoneColor? ghostCapturedBy;
+
+    if (hasCapturedThisTurn) {
+      // New capture this turn - show these ghosts
+      ghostPositions = newCapturedPositions;
+      ghostColor = currentState.currentPlayer.opponent; // Captured stones were opponent's
+      ghostCapturedBy = currentState.currentPlayer;
+    } else if (currentState.capturedByPlayer == currentState.currentPlayer) {
+      // Same player who captured is moving again - clear ghosts
+      ghostPositions = const {};
+      ghostColor = null;
+      ghostCapturedBy = null;
+    } else {
+      // Keep existing ghosts (opponent hasn't moved yet or no ghosts exist)
+      ghostPositions = currentState.lastCapturedPositions;
+      ghostColor = currentState.lastCapturedColor;
+      ghostCapturedBy = currentState.capturedByPlayer;
+    }
+
     // Create new state
     var newState = currentState.copyWith(
       board: result.newBoard,
@@ -89,6 +135,11 @@ class GameNotifier extends StateNotifier<GameState?> {
       history: newHistory,
       consecutivePasses: 0,
       enclosures: newEnclosures,
+      lastCapturedPositions: ghostPositions,
+      lastCapturedColor: ghostColor,
+      clearCapturedColor: ghostColor == null,
+      capturedByPlayer: ghostCapturedBy,
+      clearCapturedByPlayer: ghostCapturedBy == null,
     );
 
     // Check win condition
@@ -98,25 +149,64 @@ class GameNotifier extends StateNotifier<GameState?> {
         status: GameStatus.finished,
         winner: winResult.winner,
       );
+      // Log game end
+      _logger.endGame(
+        winner: winResult.winner,
+        endReason: _getEndReason(newState),
+      );
     }
 
     state = newState;
     return true;
   }
 
+  /// Get the reason the game ended
+  String _getEndReason(GameState gameState) {
+    if (gameState.consecutivePasses >= 2) {
+      return 'double_pass';
+    }
+    if (gameState.settings.mode == GameMode.fixedMoves &&
+        gameState.moveCount >= gameState.settings.targetValue) {
+      return 'move_limit_reached';
+    }
+    if (gameState.settings.mode == GameMode.captureTarget) {
+      if (gameState.blackCaptures >= gameState.settings.targetValue) {
+        return 'capture_target_black';
+      }
+      if (gameState.whiteCaptures >= gameState.settings.targetValue) {
+        return 'capture_target_white';
+      }
+    }
+    return 'unknown';
+  }
+
   /// Pass turn
-  void pass() {
+  /// [isAiMove] indicates if this pass was made by the AI (for logging)
+  void pass({bool isAiMove = false}) {
     if (state == null || state!.status != GameStatus.playing) {
       return;
     }
 
     final currentState = state!;
 
+    // Log the pass
+    _logger.logPass(
+      moveNumber: currentState.moveCount + 1,
+      player: currentState.currentPlayer,
+      isAiMove: isAiMove,
+    );
+
+    // Clear ghosts if the player who captured is passing
+    final shouldClearGhosts = currentState.capturedByPlayer == currentState.currentPlayer;
+
     var newState = currentState.copyWith(
       currentPlayer: currentState.currentPlayer.opponent,
       moveCount: currentState.moveCount + 1,
       consecutivePasses: currentState.consecutivePasses + 1,
       clearLastMove: true,
+      lastCapturedPositions: shouldClearGhosts ? const {} : null,
+      clearCapturedColor: shouldClearGhosts,
+      clearCapturedByPlayer: shouldClearGhosts,
     );
 
     // Check win condition (double pass ends game)
@@ -125,6 +215,11 @@ class GameNotifier extends StateNotifier<GameState?> {
       newState = newState.copyWith(
         status: GameStatus.finished,
         winner: winResult.winner,
+      );
+      // Log game end
+      _logger.endGame(
+        winner: winResult.winner,
+        endReason: _getEndReason(newState),
       );
     }
 
@@ -153,6 +248,9 @@ class GameNotifier extends StateNotifier<GameState?> {
       history: newHistory,
       clearLastMove: true,
       consecutivePasses: 0,
+      lastCapturedPositions: const {},
+      clearCapturedColor: true,
+      clearCapturedByPlayer: true,
     );
   }
 

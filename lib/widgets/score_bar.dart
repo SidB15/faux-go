@@ -7,12 +7,14 @@ class ScoreBar extends StatelessWidget {
   final GameState gameState;
   final bool isAiThinking;
   final VoidCallback? onMenuPressed;
+  final VoidCallback? onExportPressed;
 
   const ScoreBar({
     super.key,
     required this.gameState,
     this.isAiThinking = false,
     this.onMenuPressed,
+    this.onExportPressed,
   });
 
   @override
@@ -75,8 +77,14 @@ class ScoreBar extends StatelessWidget {
             ),
           ),
 
-          // Spacer to balance menu button
-          const SizedBox(width: 40),
+          // Export button on right
+          IconButton(
+            onPressed: onExportPressed,
+            icon: const Icon(Icons.save_alt, color: Colors.white),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            tooltip: 'Export game log',
+          ),
         ],
       ),
     );

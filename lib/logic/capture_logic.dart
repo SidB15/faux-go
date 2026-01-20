@@ -37,7 +37,8 @@ class MoveResult {
 
 class CaptureLogic {
   /// Process a move: place stone, check for encirclement captures
-  /// Also checks if position is inside opponent's fort (enclosure)
+  /// Also checks if position is inside ANY enclosure (both players)
+  /// Playing inside an enclosure has no tactical value
   static MoveResult processMove(
     Board board,
     Position pos,
@@ -54,10 +55,10 @@ class CaptureLogic {
       return MoveResult.invalid('Position is already occupied');
     }
 
-    // Check if position is inside opponent's enclosure (fort)
+    // Check if position is inside ANY enclosure (useless move for both players)
     for (final enclosure in existingEnclosures) {
-      if (enclosure.owner != color && enclosure.containsPosition(pos)) {
-        return MoveResult.invalid('Cannot place stone inside opponent\'s fort');
+      if (enclosure.containsPosition(pos)) {
+        return MoveResult.invalid('Cannot place stone inside an enclosure');
       }
     }
 
@@ -72,12 +73,18 @@ class CaptureLogic {
       newBoard = newBoard.removeStones(captureInfo.capturedPositions);
     }
 
+    // Also check for empty enclosures (closed shapes without enemy stones)
+    final emptyEnclosures = _findEmptyEnclosures(newBoard, color, existingEnclosures);
+
+    // Combine capture enclosures with empty enclosures
+    final allNewEnclosures = [...captureInfo.newEnclosures, ...emptyEnclosures];
+
     return MoveResult.valid(
       board: newBoard,
       capture: CaptureResult(
         newBoard: newBoard,
         capturedPositions: captureInfo.capturedPositions,
-        newEnclosures: captureInfo.newEnclosures,
+        newEnclosures: allNewEnclosures,
       ),
     );
   }
@@ -233,4 +240,125 @@ class _CaptureInfo {
     required this.capturedPositions,
     required this.newEnclosures,
   });
+}
+
+/// Find empty enclosures: closed regions surrounded by a player's stones
+/// with no enemy stones inside (just empty spaces or own stones)
+List<Enclosure> _findEmptyEnclosures(
+  Board board,
+  StoneColor color,
+  List<Enclosure> existingEnclosures,
+) {
+  final newEnclosures = <Enclosure>[];
+  final checkedPositions = <Position>{};
+
+  // Mark all positions already inside existing enclosures
+  for (final enclosure in existingEnclosures) {
+    checkedPositions.addAll(enclosure.interiorPositions);
+  }
+
+  // Check each empty position to see if it's enclosed by the current player
+  for (int x = 0; x < board.size; x++) {
+    for (int y = 0; y < board.size; y++) {
+      final pos = Position(x, y);
+
+      // Skip if already checked or not empty
+      if (checkedPositions.contains(pos)) continue;
+      if (!board.isEmpty(pos)) continue;
+
+      // Flood fill to find the region of empty spaces (can include own stones)
+      final regionResult = _findEmptyRegion(board, pos, color);
+
+      // Mark all positions in this region as checked
+      checkedPositions.addAll(regionResult.region);
+
+      // If region cannot escape to edge and has walls, it's an enclosure
+      if (!regionResult.canEscape &&
+          regionResult.wallPositions.isNotEmpty &&
+          regionResult.region.isNotEmpty) {
+        // Make sure this enclosure doesn't overlap with existing ones
+        final interiorOverlaps = existingEnclosures.any((e) =>
+            e.interiorPositions.any((p) => regionResult.region.contains(p)));
+
+        if (!interiorOverlaps) {
+          newEnclosures.add(Enclosure(
+            owner: color,
+            wallPositions: regionResult.wallPositions,
+            interiorPositions: regionResult.region,
+          ));
+        }
+      }
+    }
+  }
+
+  return newEnclosures;
+}
+
+/// Find a region of empty spaces (can traverse through own stones)
+/// and check if it can reach the board edge
+class _EmptyRegionResult {
+  final Set<Position> region;
+  final bool canEscape;
+  final Set<Position> wallPositions;
+
+  _EmptyRegionResult({
+    required this.region,
+    required this.canEscape,
+    required this.wallPositions,
+  });
+}
+
+_EmptyRegionResult _findEmptyRegion(
+  Board board,
+  Position startPos,
+  StoneColor ownerColor,
+) {
+  final region = <Position>{};
+  final wallPositions = <Position>{};
+  final toVisit = <Position>[startPos];
+  bool canEscape = false;
+
+  while (toVisit.isNotEmpty) {
+    final current = toVisit.removeLast();
+
+    if (region.contains(current)) continue;
+    if (!board.isValidPosition(current)) continue;
+
+    final stone = board.getStoneAt(current);
+
+    // If it's an opponent's stone, it's not part of this enclosure attempt
+    // (we're looking for regions enclosed purely by ownerColor)
+    if (stone != null && stone != ownerColor) {
+      // This region touches opponent stones, not a valid empty enclosure
+      canEscape = true; // Mark as "escaped" since it's not a clean enclosure
+      continue;
+    }
+
+    // If it's the owner's stone, it's part of the wall
+    if (stone == ownerColor) {
+      wallPositions.add(current);
+      continue;
+    }
+
+    // Empty space - add to region
+    region.add(current);
+
+    // Check if this position is on the board edge
+    if (CaptureLogic._isOnEdge(current, board.size)) {
+      canEscape = true;
+    }
+
+    // Add adjacent positions to visit
+    for (final adjacent in current.adjacentPositions) {
+      if (!region.contains(adjacent) && !wallPositions.contains(adjacent)) {
+        toVisit.add(adjacent);
+      }
+    }
+  }
+
+  return _EmptyRegionResult(
+    region: region,
+    canEscape: canEscape,
+    wallPositions: wallPositions,
+  );
 }

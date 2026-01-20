@@ -18,6 +18,12 @@ class GameState {
   final List<Board> history;
   final int consecutivePasses;
   final List<Enclosure> enclosures;
+  /// Positions of stones captured in the last move (for ghost display)
+  final Set<Position> lastCapturedPositions;
+  /// Color of the stones that were captured (for ghost display)
+  final StoneColor? lastCapturedColor;
+  /// Player who made the capture (ghosts clear when this player moves again)
+  final StoneColor? capturedByPlayer;
 
   const GameState({
     required this.settings,
@@ -32,6 +38,9 @@ class GameState {
     this.history = const [],
     this.consecutivePasses = 0,
     this.enclosures = const [],
+    this.lastCapturedPositions = const {},
+    this.lastCapturedColor,
+    this.capturedByPlayer,
   });
 
   /// Create initial game state
@@ -92,6 +101,11 @@ class GameState {
     List<Board>? history,
     int? consecutivePasses,
     List<Enclosure>? enclosures,
+    Set<Position>? lastCapturedPositions,
+    StoneColor? lastCapturedColor,
+    bool clearCapturedColor = false,
+    StoneColor? capturedByPlayer,
+    bool clearCapturedByPlayer = false,
   }) {
     return GameState(
       settings: settings ?? this.settings,
@@ -106,6 +120,9 @@ class GameState {
       history: history ?? this.history,
       consecutivePasses: consecutivePasses ?? this.consecutivePasses,
       enclosures: enclosures ?? this.enclosures,
+      lastCapturedPositions: lastCapturedPositions ?? this.lastCapturedPositions,
+      lastCapturedColor: clearCapturedColor ? null : (lastCapturedColor ?? this.lastCapturedColor),
+      capturedByPlayer: clearCapturedByPlayer ? null : (capturedByPlayer ?? this.capturedByPlayer),
     );
   }
 }

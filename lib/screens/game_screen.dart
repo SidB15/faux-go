@@ -16,7 +16,9 @@ class GameScreen extends ConsumerStatefulWidget {
 
 class _GameScreenState extends ConsumerState<GameScreen> {
   final AiEngine _aiEngine = AiEngine();
+  final TransformationController _transformationController = TransformationController();
   bool _isAiThinking = false;
+  Size? _viewportSize;
 
   @override
   void initState() {
@@ -25,6 +27,12 @@ class _GameScreenState extends ConsumerState<GameScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkAndPlayAiMove();
     });
+  }
+
+  @override
+  void dispose() {
+    _transformationController.dispose();
+    super.dispose();
   }
 
   void _checkAndPlayAiMove() {
@@ -41,6 +49,40 @@ class _GameScreenState extends ConsumerState<GameScreen> {
     // AI plays as white (second player)
     if (gameState.currentPlayer == StoneColor.white) {
       _playAiMove(gameState, settings);
+    }
+  }
+
+  Future<void> _exportCurrentGame(BuildContext context) async {
+    try {
+      final path = await GameLogger.exportAllLogsForAnalysis();
+      if (path != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Game exported to:\n$path'),
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(
+              label: 'OK',
+              onPressed: () {},
+            ),
+          ),
+        );
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No games to export'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Export failed: $e'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
     }
   }
 
@@ -66,10 +108,10 @@ class _GameScreenState extends ConsumerState<GameScreen> {
     );
 
     if (move != null) {
-      ref.read(gameStateProvider.notifier).placeStone(move);
+      ref.read(gameStateProvider.notifier).placeStone(move, isAiMove: true);
     } else {
       // AI passes if no valid move
-      ref.read(gameStateProvider.notifier).pass();
+      ref.read(gameStateProvider.notifier).pass(isAiMove: true);
     }
 
     if (mounted) {
@@ -128,30 +170,42 @@ class _GameScreenState extends ConsumerState<GameScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Score bar at top with menu
+            // Score bar at top with menu and export
             ScoreBar(
               gameState: gameState,
               isAiThinking: _isAiThinking,
               onMenuPressed: () => showGameMenu(context, ref),
+              onExportPressed: () => _exportCurrentGame(context),
             ),
 
             // Game board (expandable)
             Expanded(
-              child: Stack(
-                children: [
-                  // Main board
-                  GameBoard(
-                    enabled: !_isAiThinking &&
-                        !(settings.isVsCpu &&
-                            gameState.currentPlayer == StoneColor.white),
-                  ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  // Store viewport size for mini-map navigation
+                  _viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
 
-                  // Mini map in bottom right
-                  Positioned(
-                    right: 16,
-                    bottom: 16,
-                    child: MiniMap(board: gameState.board),
-                  ),
+                  return Stack(
+                    children: [
+                      // Main board
+                      GameBoard(
+                        enabled: !_isAiThinking &&
+                            !(settings.isVsCpu &&
+                                gameState.currentPlayer == StoneColor.white),
+                        transformationController: _transformationController,
+                      ),
+
+                      // Mini map in bottom right
+                      Positioned(
+                        right: 16,
+                        bottom: 16,
+                        child: MiniMap(
+                          board: gameState.board,
+                          transformationController: _transformationController,
+                          cellSize: GameBoard.cellSize,
+                          viewportSize: _viewportSize,
+                        ),
+                      ),
 
                   // AI thinking indicator
                   if (_isAiThinking)
@@ -190,7 +244,9 @@ class _GameScreenState extends ConsumerState<GameScreen> {
                         ),
                       ),
                     ),
-                ],
+                    ],
+                  );
+                },
               ),
             ),
 

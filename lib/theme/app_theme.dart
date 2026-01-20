@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
 class AppTheme {
-  // Board colors
-  static const Color boardBackground = Color(0xFFDEB887); // Burlywood/tan
-  static const Color gridLine = Color(0xFF8B7355); // Dark tan
-  static const Color gridLineAccent = Color(0xFF5D4E37); // Darker for markers
+  // Board colors - muted parchment/tactical table feel
+  static const Color boardBackground = Color(0xFFC9B38E); // Matte beige/light walnut
+  static const Color gridLine = Color(0xFF8B7355); // Micro grid - darker for visibility
+  static const Color gridLineAccent = Color(0xFF9A8567); // Major grid lines (every 6th)
+  static const Color gridLineBoundary = Color(0xFF7A5E3C); // Board edge/frame
 
   // Stone colors
   static const Color blackStone = Color(0xFF1A1A1A);

@@ -9,7 +9,7 @@ class GameSettings {
   const GameSettings({
     required this.mode,
     required this.targetValue,
-    this.opponentType = OpponentType.human,
+    this.opponentType = OpponentType.cpu,
     this.aiLevel = AiLevel.level5,
   });
 
@@ -17,7 +17,7 @@ class GameSettings {
   static const GameSettings defaultSettings = GameSettings(
     mode: GameMode.fixedMoves,
     targetValue: 200,
-    opponentType: OpponentType.human,
+    opponentType: OpponentType.cpu,
     aiLevel: AiLevel.level5,
   );
 

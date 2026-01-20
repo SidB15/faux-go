@@ -7,17 +7,19 @@ import '../theme/app_theme.dart';
 class _PaintCache {
   static final Paint backgroundPaint = Paint()..color = AppTheme.boardBackground;
 
-  static final Paint linePaint = Paint()
-    ..color = AppTheme.gridLine
+  // 3-tier grid line system (paints created dynamically based on zoom)
+  static Paint createMicroGridPaint(double opacity) => Paint()
+    ..color = AppTheme.gridLine.withValues(alpha: opacity)
+    ..strokeWidth = 0.5;
+
+  static Paint createMajorGridPaint(double opacity) => Paint()
+    ..color = AppTheme.gridLineAccent.withValues(alpha: opacity)
     ..strokeWidth = 1.0;
 
-  static final Paint accentPaint = Paint()
-    ..color = AppTheme.gridLineAccent
-    ..strokeWidth = 1.5;
-
-  static final Paint starPointPaint = Paint()
-    ..color = AppTheme.gridLineAccent
-    ..style = PaintingStyle.fill;
+  static final Paint boundaryPaint = Paint()
+    ..color = AppTheme.gridLineBoundary
+    ..strokeWidth = 2.0
+    ..style = PaintingStyle.stroke;
 
   // Stone paints - shadow uses simple offset instead of expensive blur
   static final Paint shadowPaint = Paint()
@@ -82,6 +84,25 @@ class _PaintCache {
     ..strokeWidth = 6.0
     ..style = PaintingStyle.stroke
     ..strokeCap = StrokeCap.round;
+
+  // Ghost stones (captured pieces shown with transparency)
+  static final Paint ghostBlackFill = Paint()
+    ..color = AppTheme.blackStone.withValues(alpha: 0.25)
+    ..style = PaintingStyle.fill;
+
+  static final Paint ghostWhiteFill = Paint()
+    ..color = AppTheme.whiteStone.withValues(alpha: 0.25)
+    ..style = PaintingStyle.fill;
+
+  static final Paint ghostBlackBorder = Paint()
+    ..color = AppTheme.blackStoneBorder.withValues(alpha: 0.3)
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.0;
+
+  static final Paint ghostWhiteBorder = Paint()
+    ..color = AppTheme.whiteStoneBorder.withValues(alpha: 0.3)
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.0;
 }
 
 class BoardPainter extends CustomPainter {
@@ -89,20 +110,31 @@ class BoardPainter extends CustomPainter {
   final Position? lastMove;
   final double cellSize;
   final List<Enclosure> enclosures;
+  /// Positions of recently captured stones (for ghost display)
+  final Set<Position> capturedPositions;
+  /// Color of the captured stones (opponent of who made the capture)
+  final StoneColor? capturedColor;
+  /// Current zoom scale (1.0 = default, <1 = zoomed out, >1 = zoomed in)
+  final double scale;
 
   BoardPainter({
     required this.board,
     this.lastMove,
     required this.cellSize,
     this.enclosures = const [],
+    this.capturedPositions = const {},
+    this.capturedColor,
+    this.scale = 1.0,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     _drawBackground(canvas, size);
+    _drawBoardBoundary(canvas, size);
     _drawGridLines(canvas, size);
     _drawStarPoints(canvas, size);
     _drawEnclosures(canvas);
+    _drawGhostStones(canvas);
     _drawStones(canvas);
     if (lastMove != null) {
       _drawLastMoveHighlight(canvas);
@@ -113,39 +145,88 @@ class BoardPainter extends CustomPainter {
     canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), _PaintCache.backgroundPaint);
   }
 
+  void _drawBoardBoundary(Canvas canvas, Size size) {
+    // Draw a clear boundary around the playing area
+    final halfCell = cellSize / 2;
+    final boardRect = Rect.fromLTRB(
+      halfCell - 2,
+      halfCell - 2,
+      (board.size - 1) * cellSize + halfCell + 2,
+      (board.size - 1) * cellSize + halfCell + 2,
+    );
+    canvas.drawRect(boardRect, _PaintCache.boundaryPaint);
+  }
+
   void _drawGridLines(Canvas canvas, Size size) {
-    // Draw vertical lines
+    // Dynamic opacity based on zoom level
+    // When zoomed out (scale < 1), fade micro grid more
+    // When zoomed in (scale > 1), restore micro grid
+    final microOpacity = (scale < 0.6)
+        ? 0.25  // Very zoomed out: still somewhat visible
+        : (scale < 1.0)
+            ? 0.25 + (scale - 0.6) * 0.375  // Zoomed out: fade gradually
+            : 0.4;  // Normal/zoomed in: clearly visible
+
+    final majorOpacity = (scale < 0.5)
+        ? 0.4  // Very zoomed out: reduced
+        : 0.6;  // Normal: visible but not dominant
+
+    final microPaint = _PaintCache.createMicroGridPaint(microOpacity);
+    final majorPaint = _PaintCache.createMajorGridPaint(majorOpacity);
+
+    final halfCell = cellSize / 2;
+    final endPos = (board.size - 1) * cellSize + halfCell;
+
+    // Draw vertical lines with 3-tier hierarchy
     for (int i = 0; i < board.size; i++) {
-      final x = i * cellSize + cellSize / 2;
-      final isAccent = i % 6 == 0;
+      final x = i * cellSize + halfCell;
+      final isBoundary = i == 0 || i == board.size - 1;
+      final isMajor = i % 6 == 0;
+
+      // Skip boundary lines (handled by _drawBoardBoundary)
+      if (isBoundary) continue;
+
       canvas.drawLine(
-        Offset(x, cellSize / 2),
-        Offset(x, (board.size - 1) * cellSize + cellSize / 2),
-        isAccent ? _PaintCache.accentPaint : _PaintCache.linePaint,
+        Offset(x, halfCell),
+        Offset(x, endPos),
+        isMajor ? majorPaint : microPaint,
       );
     }
 
-    // Draw horizontal lines
+    // Draw horizontal lines with 3-tier hierarchy
     for (int i = 0; i < board.size; i++) {
-      final y = i * cellSize + cellSize / 2;
-      final isAccent = i % 6 == 0;
+      final y = i * cellSize + halfCell;
+      final isBoundary = i == 0 || i == board.size - 1;
+      final isMajor = i % 6 == 0;
+
+      // Skip boundary lines (handled by _drawBoardBoundary)
+      if (isBoundary) continue;
+
       canvas.drawLine(
-        Offset(cellSize / 2, y),
-        Offset((board.size - 1) * cellSize + cellSize / 2, y),
-        isAccent ? _PaintCache.accentPaint : _PaintCache.linePaint,
+        Offset(halfCell, y),
+        Offset(endPos, y),
+        isMajor ? majorPaint : microPaint,
       );
     }
   }
 
   void _drawStarPoints(Canvas canvas, Size size) {
-    // Star points at every 12 intersections (and corners at 6, 42)
-    // Add star points at 6, 24, 42 positions
+    // Star points at strategic positions
+    // Only draw if not too zoomed out (they'd be invisible anyway)
+    if (scale < 0.4) return;
+
+    final starPointOpacity = scale < 0.7 ? 0.3 : 0.6;
+    final starPaint = Paint()
+      ..color = AppTheme.gridLineAccent.withValues(alpha: starPointOpacity)
+      ..style = PaintingStyle.fill;
+
+    // Star points at 6, 24, 42 positions (corners and center regions)
     for (int x in [6, 24, 42]) {
       for (int y in [6, 24, 42]) {
         if (x < board.size && y < board.size) {
           final px = x * cellSize + cellSize / 2;
           final py = y * cellSize + cellSize / 2;
-          canvas.drawCircle(Offset(px, py), cellSize * 0.12, _PaintCache.starPointPaint);
+          canvas.drawCircle(Offset(px, py), cellSize * 0.1, starPaint);
         }
       }
     }
@@ -183,6 +264,29 @@ class BoardPainter extends CustomPainter {
       final y2 = edge.$2.y * cellSize + cellSize / 2;
 
       canvas.drawLine(Offset(x1, y1), Offset(x2, y2), linePaint);
+    }
+  }
+
+  void _drawGhostStones(Canvas canvas) {
+    if (capturedPositions.isEmpty || capturedColor == null) return;
+
+    for (final pos in capturedPositions) {
+      _drawGhostStone(canvas, pos, capturedColor!);
+    }
+  }
+
+  void _drawGhostStone(Canvas canvas, Position pos, StoneColor color) {
+    final x = pos.x * cellSize + cellSize / 2;
+    final y = pos.y * cellSize + cellSize / 2;
+    final radius = cellSize * 0.42;
+
+    // Draw ghost stone with transparency
+    if (color == StoneColor.black) {
+      canvas.drawCircle(Offset(x, y), radius, _PaintCache.ghostBlackFill);
+      canvas.drawCircle(Offset(x, y), radius, _PaintCache.ghostBlackBorder);
+    } else {
+      canvas.drawCircle(Offset(x, y), radius, _PaintCache.ghostWhiteFill);
+      canvas.drawCircle(Offset(x, y), radius, _PaintCache.ghostWhiteBorder);
     }
   }
 
@@ -242,6 +346,8 @@ class BoardPainter extends CustomPainter {
     return oldDelegate.board != board ||
         oldDelegate.lastMove != lastMove ||
         oldDelegate.cellSize != cellSize ||
-        oldDelegate.enclosures.length != enclosures.length;
+        oldDelegate.enclosures.length != enclosures.length ||
+        oldDelegate.capturedPositions.length != capturedPositions.length ||
+        oldDelegate.scale != scale;
   }
 }
