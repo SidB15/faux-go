@@ -92,8 +92,9 @@ class AiEngine {
         }
       }
     } else {
-      // Focus on positions near existing stones (within radius of 4)
-      const searchRadius = 4;
+      // Focus on positions near existing stones (within radius of 2)
+      // This keeps the game tight and focused
+      const searchRadius = 2;
       for (final entry in board.stones.entries) {
         final stonePos = entry.key;
         for (int dx = -searchRadius; dx <= searchRadius; dx++) {
@@ -148,56 +149,59 @@ class AiEngine {
     final newBoard = result.newBoard!;
     final capturedCount = result.captureResult?.captureCount ?? 0;
 
-    // 1. Capture bonus (highest priority)
-    score += capturedCount * 100;
+    // 1. Capture bonus (high priority)
+    score += capturedCount * 80;
 
-    // 2. Proximity to opponent's last move (HIGH PRIORITY - keeps game focused)
-    score += _evaluateProximityToOpponent(board, pos, opponentLastMove) * 25;
+    // 2. Proximity to opponent's last move (HIGHEST PRIORITY - keeps game focused)
+    // This is weighted very heavily to ensure AI stays within 1-2 cells
+    score += _evaluateProximityToOpponent(board, pos, opponentLastMove);
 
     // 3. Threaten captures (stones with few liberties)
-    score += _evaluateThreats(newBoard, pos, aiColor) * 20;
+    score += _evaluateThreats(newBoard, pos, aiColor) * 15;
 
     // 4. Defend own groups (play near own stones with few liberties)
-    score += _evaluateDefense(board, pos, aiColor) * 15;
+    score += _evaluateDefense(board, pos, aiColor) * 12;
 
     // 5. Respond to opponent stones nearby (contest their territory)
-    score += _evaluateContestOpponent(board, pos, aiColor) * 12;
+    score += _evaluateContestOpponent(board, pos, aiColor) * 8;
 
     // 6. Expand territory (prefer moves near own stones)
-    score += _evaluateExpansion(board, pos, aiColor) * 5;
+    score += _evaluateExpansion(board, pos, aiColor) * 3;
 
     // 7. Avoid edges early game (center is more valuable)
-    score += _evaluateCenterBonus(board, pos) * 2;
+    score += _evaluateCenterBonus(board, pos) * 1;
 
     // 8. Avoid self-atari (putting own stones in danger)
-    score -= _evaluateSelfAtari(newBoard, pos, aiColor) * 30;
+    score -= _evaluateSelfAtari(newBoard, pos, aiColor) * 20;
 
     // 9. Connection bonus (connect own groups)
-    score += _evaluateConnection(board, pos, aiColor) * 10;
+    score += _evaluateConnection(board, pos, aiColor) * 5;
 
     return score;
   }
 
-  /// Evaluate proximity to opponent's last move - AI should respond nearby
+  /// Evaluate proximity to opponent's last move - AI MUST respond nearby
+  /// This is the most important factor for keeping the game focused
   double _evaluateProximityToOpponent(Board board, Position pos, Position? opponentLastMove) {
     if (opponentLastMove == null) return 0;
 
-    // Calculate Manhattan distance to opponent's last move
+    // Calculate Chebyshev distance (max of dx, dy) - this is "grid distance"
     final dx = (pos.x - opponentLastMove.x).abs();
     final dy = (pos.y - opponentLastMove.y).abs();
-    final distance = dx + dy;
+    final distance = max(dx, dy); // Chebyshev distance (1-2 grid cells)
 
-    // Strong bonus for moves very close to opponent's last move
-    if (distance <= 2) {
-      return 10; // Very close - high priority
+    // VERY strong bonus for moves within 1-2 cells of opponent's last move
+    // and PENALTY for moves further away
+    if (distance <= 1) {
+      return 50; // Adjacent - highest priority
+    } else if (distance <= 2) {
+      return 35; // 2 cells away - very good
+    } else if (distance <= 3) {
+      return 10; // 3 cells - acceptable
     } else if (distance <= 4) {
-      return 7; // Close - good response
-    } else if (distance <= 6) {
-      return 4; // Moderate distance
-    } else if (distance <= 10) {
-      return 2; // Still relevant
+      return -10; // Starting to get far - slight penalty
     } else {
-      return 0; // Too far - no bonus
+      return -30; // Too far - strong penalty to discourage
     }
   }
 
@@ -206,22 +210,20 @@ class AiEngine {
     double contestScore = 0;
     final opponentColor = aiColor.opponent;
 
-    // Check for opponent stones within a radius of 5
-    for (int dx = -5; dx <= 5; dx++) {
-      for (int dy = -5; dy <= 5; dy++) {
+    // Check for opponent stones within a radius of 2 (tight focus)
+    for (int dx = -2; dx <= 2; dx++) {
+      for (int dy = -2; dy <= 2; dy++) {
         if (dx == 0 && dy == 0) continue;
         final nearPos = Position(pos.x + dx, pos.y + dy);
         if (!board.isValidPosition(nearPos)) continue;
 
         if (board.getStoneAt(nearPos) == opponentColor) {
-          final distance = dx.abs() + dy.abs();
+          final distance = max(dx.abs(), dy.abs()); // Chebyshev distance
           // Bonus for being near opponent stones (to contest them)
-          if (distance <= 2) {
-            contestScore += 3; // Very close - direct contest
-          } else if (distance <= 4) {
-            contestScore += 1.5; // Nearby - indirect pressure
-          } else {
-            contestScore += 0.5; // In the area
+          if (distance == 1) {
+            contestScore += 5; // Adjacent - direct contest
+          } else if (distance == 2) {
+            contestScore += 2; // 2 cells away
           }
         }
       }
@@ -285,19 +287,19 @@ class AiEngine {
   double _evaluateExpansion(Board board, Position pos, StoneColor aiColor) {
     double expansionScore = 0;
 
-    // Prefer moves near own stones (but not too close)
-    for (int dx = -3; dx <= 3; dx++) {
-      for (int dy = -3; dy <= 3; dy++) {
+    // Prefer moves near own stones (within 2 cells)
+    for (int dx = -2; dx <= 2; dx++) {
+      for (int dy = -2; dy <= 2; dy++) {
         if (dx == 0 && dy == 0) continue;
         final nearPos = Position(pos.x + dx, pos.y + dy);
         if (!board.isValidPosition(nearPos)) continue;
 
         if (board.getStoneAt(nearPos) == aiColor) {
-          final distance = (dx.abs() + dy.abs()).toDouble();
-          if (distance >= 2 && distance <= 3) {
-            expansionScore += 2; // Good expansion distance
+          final distance = max(dx.abs(), dy.abs()); // Chebyshev distance
+          if (distance == 2) {
+            expansionScore += 3; // Good expansion distance
           } else if (distance == 1) {
-            expansionScore += 0.5; // Connected but not expanding much
+            expansionScore += 1; // Adjacent - connected
           }
         }
       }
