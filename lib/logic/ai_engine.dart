@@ -256,13 +256,14 @@ class AiEngine {
 
   /// Check if a position is in a "danger zone" - an area about to be enclosed
   /// Criteria: Limited escape routes AND high opponent presence on perimeter
-  /// CRITICAL: Also checks if opponent can close the encirclement in 1 move
+  /// CRITICAL: Also checks if opponent can close the encirclement in 1-2 moves
+  /// ENHANCED: More aggressive detection of forming encirclements
   bool _isInDangerZone(Board board, Position pos, StoneColor aiColor, _EscapeResult escapeResult) {
     final opponentColor = aiColor.opponent;
 
-    // CRITICAL CHECK: Can opponent complete encirclement in 1 move?
+    // CRITICAL CHECK: Can opponent complete encirclement in 1-2 moves?
     // Find the "critical gaps" - empty positions on edge exits that opponent could fill
-    if (escapeResult.edgeExitCount <= 3 && escapeResult.emptyRegion.length < 30) {
+    if (escapeResult.edgeExitCount <= 4 && escapeResult.emptyRegion.length < 40) {
       final criticalGaps = _findCriticalGaps(board, escapeResult.emptyRegion, opponentColor);
 
       // If opponent can close ALL remaining exits with 1-2 moves, this is extremely dangerous
@@ -271,42 +272,56 @@ class AiEngine {
         return true;
       }
 
-      // Even if there are a few exits, if most can be closed in one move, it's dangerous
-      if (escapeResult.edgeExitCount <= 2 && criticalGaps.isNotEmpty) {
+      // Even if there are a few exits, if most can be closed quickly, it's dangerous
+      if (escapeResult.edgeExitCount <= 3 && criticalGaps.isNotEmpty) {
         return true;
       }
     }
 
-    // If region is small and has very few edge connections, it's dangerous
-    if (escapeResult.edgeExitCount <= 2 && escapeResult.emptyRegion.length < 20) {
-      // Count opponent stones on the perimeter of this region
-      int opponentPerimeterCount = 0;
-      int totalPerimeterCount = 0;
+    // ENHANCED: Count opponent stones on the perimeter of this region
+    // Use a more aggressive threshold for detecting danger
+    int opponentPerimeterCount = 0;
+    int totalPerimeterCount = 0;
+    int aiPerimeterCount = 0;
 
-      for (final emptyPos in escapeResult.emptyRegion) {
-        for (final adj in emptyPos.adjacentPositions) {
-          if (!board.isValidPosition(adj)) continue;
-          final stone = board.getStoneAt(adj);
-          if (stone != null) {
-            totalPerimeterCount++;
-            if (stone == opponentColor) {
-              opponentPerimeterCount++;
-            }
+    for (final emptyPos in escapeResult.emptyRegion) {
+      for (final adj in emptyPos.adjacentPositions) {
+        if (!board.isValidPosition(adj)) continue;
+        final stone = board.getStoneAt(adj);
+        if (stone != null) {
+          totalPerimeterCount++;
+          if (stone == opponentColor) {
+            opponentPerimeterCount++;
+          } else {
+            aiPerimeterCount++;
           }
         }
       }
+    }
 
-      // If opponent controls most of the perimeter, it's a danger zone
-      if (totalPerimeterCount > 0) {
-        final opponentRatio = opponentPerimeterCount / totalPerimeterCount;
-        // More than 60% opponent stones on perimeter = danger zone (lowered from 70%)
-        if (opponentRatio > 0.6) {
-          return true;
-        }
-        // Or if very few exits and some opponent presence
-        if (escapeResult.edgeExitCount == 1 && opponentRatio > 0.4) {
-          return true;
-        }
+    // If opponent controls most of the perimeter, it's a danger zone
+    if (totalPerimeterCount > 0) {
+      final opponentRatio = opponentPerimeterCount / totalPerimeterCount;
+
+      // ENHANCED THRESHOLDS:
+      // Few exits (1-2) with any significant opponent presence = danger
+      if (escapeResult.edgeExitCount <= 2) {
+        if (opponentRatio > 0.35) return true;  // Lowered from 0.4/0.6
+      }
+
+      // Medium exits (3-4) with high opponent presence = danger
+      if (escapeResult.edgeExitCount <= 4 && escapeResult.emptyRegion.length < 25) {
+        if (opponentRatio > 0.5) return true;  // New check
+      }
+
+      // Small region with opponent dominance = danger regardless of exits
+      if (escapeResult.emptyRegion.length < 15 && opponentRatio > 0.6) {
+        return true;
+      }
+
+      // If opponent has way more stones than us on perimeter, we're losing the battle
+      if (opponentPerimeterCount > aiPerimeterCount * 2 && escapeResult.edgeExitCount <= 4) {
+        return true;
       }
     }
 
@@ -765,6 +780,12 @@ class AiEngine {
       score += _evaluateContestOpponent(board, pos, aiColor) * 8;
     }
 
+    // === LEVEL 3+: Penalty for placing in contested/surrounded positions ===
+    if (levelValue >= 3) {
+      // CRITICAL: Penalize moves where we're being surrounded
+      score -= _evaluateSurroundedPenalty(board, pos, aiColor) * 25;
+    }
+
     // === LEVEL 6+: Add encirclement progress and blocking ===
     if (levelValue >= 6) {
       // 11. Bonus for blocking opponent's encirclement attempts
@@ -1129,6 +1150,7 @@ class AiEngine {
 
   /// Find all positions where opponent could capture our stones on their next move
   /// These are CRITICAL positions that must be blocked
+  /// ENHANCED: Also detects forming encirclements earlier (edgeExits <= 4)
   Set<Position> _findCriticalBlockingPositions(Board board, StoneColor aiColor, List<Enclosure> enclosures, _TurnCache cache) {
     final criticalPositions = <Position>{};
     final opponentColor = aiColor.opponent;
@@ -1151,9 +1173,10 @@ class AiEngine {
         }
       }
 
-      // For groups with low edge exits, also check positions that could seal them
-      if (group.edgeExitCount <= 2) {
-        // Find positions that could complete the encirclement
+      // ENHANCED: Detect forming encirclements EARLIER (edgeExits <= 4, was <= 2)
+      // Also look at positions that significantly reduce our escape options
+      if (group.edgeExitCount <= 4) {
+        // Find positions that could complete or progress the encirclement
         for (final stone in group.stones) {
           for (final adj in stone.adjacentPositions) {
             if (!board.isValidPosition(adj)) continue;
@@ -1163,16 +1186,79 @@ class AiEngine {
             final simulatedBoard = board.placeStone(adj, opponentColor);
             final escapeAfter = _checkEscapePathDetailed(simulatedBoard, stone, aiColor);
 
+            // CRITICAL: Block if it would completely seal us
             if (!escapeAfter.canEscape || escapeAfter.edgeExitCount == 0) {
-              // This position would seal us in!
               criticalPositions.add(adj);
+            }
+            // IMPORTANT: Also block moves that significantly reduce our escape
+            else if (escapeAfter.edgeExitCount < group.edgeExitCount - 1) {
+              // Losing 2+ exits is serious - add to critical
+              criticalPositions.add(adj);
+            }
+          }
+        }
+
+        // ADDITIONAL: Find gaps in opponent's wall around our group
+        // These are empty positions between opponent stones that form a wall
+        final wallGaps = _findWallGapsAroundGroup(board, group, opponentColor);
+        criticalPositions.addAll(wallGaps);
+      }
+    }
+
+    return criticalPositions;
+  }
+
+  /// Find gaps in opponent's wall formation around an AI group
+  /// These are empty positions that, if filled by us, would break the encirclement
+  Set<Position> _findWallGapsAroundGroup(Board board, _GroupInfo group, StoneColor opponentColor) {
+    final gaps = <Position>{};
+
+    // Look at all positions within distance 2 of any stone in the group
+    for (final stone in group.stones) {
+      for (int dx = -2; dx <= 2; dx++) {
+        for (int dy = -2; dy <= 2; dy++) {
+          if (dx == 0 && dy == 0) continue;
+          final checkPos = Position(stone.x + dx, stone.y + dy);
+          if (!board.isValidPosition(checkPos)) continue;
+          if (!board.isEmpty(checkPos)) continue;
+
+          // Count opponent stones adjacent to this empty position
+          int adjacentOpponent = 0;
+          bool adjacentToOurGroup = false;
+
+          for (final adj in checkPos.adjacentPositions) {
+            if (!board.isValidPosition(adj)) continue;
+            final adjStone = board.getStoneAt(adj);
+            if (adjStone == opponentColor) {
+              adjacentOpponent++;
+            }
+            if (group.stones.contains(adj)) {
+              adjacentToOurGroup = true;
+            }
+          }
+
+          // This is a wall gap if:
+          // 1. It's adjacent to 2+ opponent stones (they're forming a wall)
+          // 2. It's near our group (either adjacent or within 1 cell)
+          if (adjacentOpponent >= 2) {
+            // Check if it's near our group
+            if (adjacentToOurGroup || group.boundaryEmpties.contains(checkPos)) {
+              gaps.add(checkPos);
+            } else {
+              // Check if it's 1 cell away from our boundary
+              for (final adj in checkPos.adjacentPositions) {
+                if (group.boundaryEmpties.contains(adj)) {
+                  gaps.add(checkPos);
+                  break;
+                }
+              }
             }
           }
         }
       }
     }
 
-    return criticalPositions;
+    return gaps;
   }
 
   /// Penalize moves placed in regions with fewer than 2 empty expansion paths
@@ -1336,6 +1422,89 @@ class AiEngine {
     }
 
     return expansionScore;
+  }
+
+  /// CRITICAL: Penalize moves in positions where we're being surrounded
+  /// Checks if opponent has stones on multiple sides forming an encirclement
+  double _evaluateSurroundedPenalty(Board board, Position pos, StoneColor aiColor) {
+    final opponentColor = aiColor.opponent;
+    double penalty = 0;
+
+    // Count opponent stones in each direction (8 directions)
+    // If opponent has presence on 3+ sides, we're being surrounded
+    int sidesWithOpponent = 0;
+    int totalOpponentNearby = 0;
+
+    // Check 8 directions in groups of 2 (opposite sides)
+    final directionPairs = [
+      [Position(-1, 0), Position(1, 0)],   // left/right
+      [Position(0, -1), Position(0, 1)],   // up/down
+      [Position(-1, -1), Position(1, 1)], // diagonals
+      [Position(-1, 1), Position(1, -1)], // diagonals
+    ];
+
+    for (final pair in directionPairs) {
+      for (final dir in pair) {
+        // Look up to 2 cells in each direction
+        bool foundOpponent = false;
+        for (int dist = 1; dist <= 2; dist++) {
+          final checkPos = Position(pos.x + dir.x * dist, pos.y + dir.y * dist);
+          if (!board.isValidPosition(checkPos)) break;
+
+          final stone = board.getStoneAt(checkPos);
+          if (stone == opponentColor) {
+            foundOpponent = true;
+            totalOpponentNearby++;
+            break;
+          } else if (stone == aiColor) {
+            // Our stone - friendly, stop looking
+            break;
+          }
+        }
+        if (foundOpponent) sidesWithOpponent++;
+      }
+    }
+
+    // Strong penalty if opponent has stones on 3+ sides (forming encirclement)
+    if (sidesWithOpponent >= 4) {
+      penalty += 8; // Heavily surrounded
+    } else if (sidesWithOpponent >= 3) {
+      penalty += 4; // Mostly surrounded
+    }
+
+    // Additional penalty based on total opponent presence nearby
+    if (totalOpponentNearby >= 5) {
+      penalty += 3;
+    } else if (totalOpponentNearby >= 4) {
+      penalty += 2;
+    }
+
+    // Check for "pincer" patterns - opponent on opposite sides
+    for (final pair in directionPairs) {
+      bool hasOpponentOnBothEnds = true;
+      for (final dir in pair) {
+        bool found = false;
+        for (int dist = 1; dist <= 2; dist++) {
+          final checkPos = Position(pos.x + dir.x * dist, pos.y + dir.y * dist);
+          if (!board.isValidPosition(checkPos)) break;
+          if (board.getStoneAt(checkPos) == opponentColor) {
+            found = true;
+            break;
+          } else if (board.getStoneAt(checkPos) != null) {
+            break;
+          }
+        }
+        if (!found) {
+          hasOpponentOnBothEnds = false;
+          break;
+        }
+      }
+      if (hasOpponentOnBothEnds) {
+        penalty += 3; // We're in a pincer (opponent on opposite sides)
+      }
+    }
+
+    return penalty;
   }
 
   /// Evaluate center bonus (prefer center over edges)

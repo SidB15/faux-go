@@ -54,11 +54,12 @@ class _GameScreenState extends ConsumerState<GameScreen> {
 
   Future<void> _exportCurrentGame(BuildContext context) async {
     try {
+      final moveCount = GameLogger.currentGameMoveCount;
       final path = await GameLogger.exportAllLogsForAnalysis();
       if (path != null && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Game exported to:\n$path'),
+            content: Text('Exported $moveCount moves to:\n$path'),
             duration: const Duration(seconds: 5),
             action: SnackBarAction(
               label: 'OK',
@@ -69,7 +70,7 @@ class _GameScreenState extends ConsumerState<GameScreen> {
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No games to export'),
+            content: Text('No game moves to export yet'),
             duration: Duration(seconds: 2),
           ),
         );

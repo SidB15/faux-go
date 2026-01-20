@@ -300,31 +300,56 @@ class GameLogger {
     return logs;
   }
 
-  /// Export all logs to a single analysis file
+  /// Export all logs (including current in-progress game) to a single analysis file
   static Future<String?> exportAllLogsForAnalysis() async {
     try {
       final logs = await loadAllLogs();
-      if (logs.isEmpty) return null;
+
+      // Also include current in-progress game if exists
+      final currentLog = _instance._currentLog;
+      final allLogs = [...logs];
+      if (currentLog != null && currentLog.moves.isNotEmpty) {
+        // Don't duplicate if somehow already in saved logs
+        if (!logs.any((l) => l.gameId == currentLog.gameId)) {
+          allLogs.insert(0, currentLog); // Add current game at start
+        }
+      }
+
+      if (allLogs.isEmpty) return null;
 
       final appDir = await getApplicationDocumentsDirectory();
+
+      // Ensure directory exists
+      final logDir = Directory('${appDir.path}/simply_go_logs');
+      if (!await logDir.exists()) {
+        await logDir.create(recursive: true);
+      }
+
       final exportFile = File('${appDir.path}/simply_go_logs/analysis_export_${DateTime.now().millisecondsSinceEpoch}.json');
 
       final exportData = {
         'exportTime': DateTime.now().toIso8601String(),
-        'totalGames': logs.length,
-        'games': logs.map((l) => l.toJson()).toList(),
+        'totalGames': allLogs.length,
+        'includesCurrentGame': currentLog != null && currentLog.moves.isNotEmpty,
+        'games': allLogs.map((l) => l.toJson()).toList(),
       };
 
       final jsonString = const JsonEncoder.withIndent('  ').convert(exportData);
       await exportFile.writeAsString(jsonString);
 
-      debugPrint('[GameLogger] Exported ${logs.length} games to ${exportFile.path}');
+      debugPrint('[GameLogger] Exported ${allLogs.length} games to ${exportFile.path}');
       return exportFile.path;
     } catch (e) {
       debugPrint('[GameLogger] Error exporting logs: $e');
       return null;
     }
   }
+
+  /// Check if there's a current game in progress with moves
+  static bool get hasCurrentGame => _instance._currentLog != null && _instance._currentLog!.moves.isNotEmpty;
+
+  /// Get move count of current game (for UI feedback)
+  static int get currentGameMoveCount => _instance._currentLog?.moves.length ?? 0;
 
   /// Get the log directory path for user reference
   static Future<String> getLogDirectoryPath() async {
