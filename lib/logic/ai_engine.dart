@@ -96,6 +96,7 @@ class AiEngine {
   /// 1. The stone would be trapped (no escape path to edge)
   /// 2. The stone is in a "danger zone" - area about to be enclosed
   /// 3. The opponent can complete encirclement with 1 move
+  /// 4. Creates small isolated group that opponent can capture in 2-3 moves
   /// UNLESS it satisfies an exception condition
   bool _isVetoedMove(Board board, Position pos, StoneColor aiColor, List<Enclosure> enclosures) {
     // Simulate placing the stone
@@ -143,7 +144,123 @@ class AiEngine {
       return true; // VETO - opponent can seal us in with one stone
     }
 
+    // VETO 4: Creates small isolated group that can be captured in 2-3 moves
+    // Simulates opponent's optimal response
+    if (_wouldCreateCaptureableGroup(board, newBoard, pos, aiColor, enclosures)) {
+      // Allow if this move captures something
+      final captureResult = CaptureLogic.processMove(board, pos, aiColor, existingEnclosures: enclosures);
+      if (captureResult.isValid && captureResult.captureResult != null &&
+          captureResult.captureResult!.captureCount > 0) {
+        return false; // Allow - we're capturing
+      }
+      return true; // VETO - creating a group that will just get captured
+    }
+
     return false; // Not vetoed
+  }
+
+  /// Check if placing at pos would create a small group that opponent can capture in 2-3 moves
+  /// This is a forward-looking check to avoid building into traps
+  bool _wouldCreateCaptureableGroup(Board originalBoard, Board newBoard, Position pos, StoneColor aiColor, List<Enclosure> enclosures) {
+    final opponentColor = aiColor.opponent;
+
+    // Find the group that includes our new stone
+    final group = _findConnectedGroup(newBoard, pos, aiColor);
+
+    // Only worry about small groups (1-3 stones)
+    if (group.length > 3) return false;
+
+    // Count opponent stones adjacent to our group
+    int opponentAdjacent = 0;
+    final groupBoundary = <Position>{};
+
+    for (final stone in group) {
+      for (final adj in stone.adjacentPositions) {
+        if (!newBoard.isValidPosition(adj)) continue;
+        if (group.contains(adj)) continue;
+
+        if (newBoard.getStoneAt(adj) == opponentColor) {
+          opponentAdjacent++;
+        } else if (newBoard.isEmpty(adj)) {
+          groupBoundary.add(adj);
+        }
+      }
+    }
+
+    // If we're adjacent to 2+ opponent stones and have small boundary, we're in danger
+    if (opponentAdjacent >= 2 && groupBoundary.length <= 4) {
+      // Simulate: can opponent capture this group in 2 moves?
+      for (final boundaryPos in groupBoundary) {
+        // Opponent plays at boundaryPos
+        final afterOpponent1 = newBoard.placeStone(boundaryPos, opponentColor);
+
+        // Check if opponent can now capture with one more move
+        final remainingBoundary = groupBoundary.where((p) => p != boundaryPos).toList();
+        for (final nextPos in remainingBoundary) {
+          final captureResult = CaptureLogic.processMove(afterOpponent1, nextPos, opponentColor, existingEnclosures: enclosures);
+          if (captureResult.isValid && captureResult.captureResult != null) {
+            if (captureResult.captureResult!.captureCount >= group.length) {
+              // Opponent can capture our entire new group in 2 moves
+              return true;
+            }
+          }
+        }
+
+        // Also check if placing at boundaryPos immediately creates an enclosure
+        final captureResult1 = CaptureLogic.processMove(newBoard, boundaryPos, opponentColor, existingEnclosures: enclosures);
+        if (captureResult1.isValid && captureResult1.captureResult != null) {
+          if (captureResult1.captureResult!.captureCount >= group.length) {
+            // Opponent can capture our group in 1 move!
+            return true;
+          }
+        }
+      }
+    }
+
+    // Check if we're building next to existing opponent stones that are forming a wall
+    // Count opponent stones within distance 2
+    int nearbyOpponent = 0;
+    int nearbyFriendly = 0;
+    for (int dx = -2; dx <= 2; dx++) {
+      for (int dy = -2; dy <= 2; dy++) {
+        if (dx == 0 && dy == 0) continue;
+        final checkPos = Position(pos.x + dx, pos.y + dy);
+        if (!newBoard.isValidPosition(checkPos)) continue;
+        final stone = newBoard.getStoneAt(checkPos);
+        if (stone == opponentColor) nearbyOpponent++;
+        if (stone == aiColor && !group.contains(checkPos)) nearbyFriendly++;
+      }
+    }
+
+    // If heavily outnumbered locally and not connected to other friendly groups
+    if (nearbyOpponent >= 4 && nearbyFriendly == 0 && group.length <= 2) {
+      return true; // Building into enemy territory without support
+    }
+
+    return false;
+  }
+
+  /// Find all stones connected to the given position of the same color
+  Set<Position> _findConnectedGroup(Board board, Position start, StoneColor color) {
+    final group = <Position>{};
+    final toVisit = <Position>[start];
+
+    while (toVisit.isNotEmpty) {
+      final current = toVisit.removeLast();
+      if (group.contains(current)) continue;
+      if (!board.isValidPosition(current)) continue;
+      if (board.getStoneAt(current) != color) continue;
+
+      group.add(current);
+
+      for (final adj in current.adjacentPositions) {
+        if (!group.contains(adj)) {
+          toVisit.add(adj);
+        }
+      }
+    }
+
+    return group;
   }
 
   /// Check if a dead-on-placement move qualifies for an exception
@@ -780,11 +897,9 @@ class AiEngine {
       score += _evaluateContestOpponent(board, pos, aiColor) * 8;
     }
 
-    // === LEVEL 3+: Penalty for placing in contested/surrounded positions ===
-    if (levelValue >= 3) {
-      // CRITICAL: Penalize moves where we're being surrounded
-      score -= _evaluateSurroundedPenalty(board, pos, aiColor) * 25;
-    }
+    // === ALL LEVELS: Penalty for placing in contested/surrounded positions ===
+    // CRITICAL: Penalize moves where we're being surrounded - this is survival!
+    score -= _evaluateSurroundedPenalty(board, pos, aiColor) * 40;
 
     // === LEVEL 6+: Add encirclement progress and blocking ===
     if (levelValue >= 6) {
