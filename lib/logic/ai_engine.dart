@@ -67,11 +67,12 @@ class AiEngine {
 
     // CRITICAL: Find positions where opponent could capture our stones
     // Now returns DETAILED info: immediate captures vs encirclement blocks
+    // Maps include stones-at-risk count for proper prioritization
     final criticalBlockingDetailed = _findCriticalBlockingPositionsDetailed(board, aiColor, enclosures, cache);
-    final immediateCaptureBlocks = criticalBlockingDetailed.immediateCaptureBlocks;
-    final encirclementBlocks = criticalBlockingDetailed.encirclementBlocks;
+    final immediateCaptureBlocks = criticalBlockingDetailed.immediateCaptureBlocks; // Map<Position, int>
+    final encirclementBlocks = criticalBlockingDetailed.encirclementBlocks; // Map<Position, int>
     // Combined set for candidate generation (backwards compatibility)
-    final criticalBlockingPositions = {...immediateCaptureBlocks, ...encirclementBlocks};
+    final criticalBlockingPositions = {...immediateCaptureBlocks.keys, ...encirclementBlocks.keys};
 
     // COUNTER-ATTACK: Find positions where we can severely damage opponent's groups
     // When we're being encircled but opponent also has weak groups, attack may be better than defense
@@ -94,8 +95,8 @@ class AiEngine {
     _logAiDecision('=== AI MOVE ANALYSIS (Level ${level.level}) ===');
     _logAiDecision('Opponent last move: $opponentLastMove');
     _logAiDecision('AI groups: ${cache.aiGroups.length}, Opponent groups: ${cache.opponentGroups.length}');
-    _logAiDecision('IMMEDIATE capture blocks: ${immediateCaptureBlocks.length} - $immediateCaptureBlocks');
-    _logAiDecision('Encirclement blocks: ${encirclementBlocks.length} - $encirclementBlocks');
+    _logAiDecision('IMMEDIATE capture blocks: ${immediateCaptureBlocks.length} - ${immediateCaptureBlocks.keys}');
+    _logAiDecision('Encirclement blocks: ${encirclementBlocks.length} - ${encirclementBlocks.keys}');
     if (criticalAttackPositions.isNotEmpty) {
       _logAiDecision('Critical ATTACK positions: ${criticalAttackPositions.length} - $criticalAttackPositions');
     }
@@ -112,14 +113,21 @@ class AiEngine {
 
     // STEP 1: Apply HARD VETO rules before scoring
     // This prevents AI from placing stones that are dead on placement
-    // EXCEPTION: Immediate capture blocks are NEVER vetoed - they prevent losing stones!
+    // EXCEPTIONS that are NEVER vetoed:
+    // 1. Immediate capture blocks - they prevent losing stones
+    // 2. Critical attack positions - counter-attacking is strategically valuable
     final validMoves = <Position>[];
     final vetoedMoves = <Position>[];
     for (final pos in candidateMoves) {
       // CRITICAL: Never veto immediate capture blocks - losing stones is worse than any veto reason
-      if (immediateCaptureBlocks.contains(pos)) {
+      if (immediateCaptureBlocks.containsKey(pos)) {
         validMoves.add(pos);
-      } else if (!_isVetoedMove(board, pos, aiColor, enclosures)) {
+      }
+      // CRITICAL: Never veto attack positions - counter-attacking weak opponent pieces is valuable
+      else if (criticalAttackPositions.contains(pos)) {
+        validMoves.add(pos);
+      }
+      else if (!_isVetoedMove(board, pos, aiColor, enclosures)) {
         validMoves.add(pos);
       } else {
         vetoedMoves.add(pos);
@@ -188,7 +196,7 @@ class AiEngine {
 
   /// Evaluate a move and return detailed score breakdown for logging
   _ScoreBreakdown _evaluateMoveWithBreakdown(
-      Board board, Position pos, StoneColor aiColor, AiLevel level, Position? opponentLastMove, List<Enclosure> enclosures, _TurnCache cache, Set<Position> immediateCaptureBlocks, Set<Position> encirclementBlocks, Set<Position> criticalAttackPositions, Set<Position> encirclementBreakingMoves) {
+      Board board, Position pos, StoneColor aiColor, AiLevel level, Position? opponentLastMove, List<Enclosure> enclosures, _TurnCache cache, Map<Position, int> immediateCaptureBlocks, Map<Position, int> encirclementBlocks, Set<Position> criticalAttackPositions, Set<Position> encirclementBreakingMoves) {
     final reasons = <String>[];
     double totalScore = 0.0;
     final levelValue = level.level;
@@ -204,14 +212,31 @@ class AiEngine {
     final capturedCount = result.captureResult?.captureCount ?? 0;
     final newEnclosures = result.captureResult?.newEnclosures ?? [];
 
+    // === GATE CHECK: DOOMED POSITION ===
+    // If this position is in an area where opponent can complete encirclement in 1 move,
+    // and we can't block it from inside, this is a wasted move - massive penalty
+    final doomedCheck = _isPositionDoomed(board, newBoard, pos, aiColor, enclosures);
+    if (doomedCheck.isDoomed) {
+      // Only allow if this move captures something valuable
+      if (capturedCount == 0) {
+        totalScore -= 800;
+        reasons.add('DOOMED_POSITION(${doomedCheck.reason}): -800');
+      }
+    }
+
     // IMMEDIATE CAPTURE BLOCK - HIGHEST PRIORITY
     // These are positions where opponent playing would DIRECTLY capture our stones
-    // This MUST be blocked immediately - no other move is more important
-    if (immediateCaptureBlocks.contains(pos)) {
-      // This is an IMMEDIATE threat - opponent plays here = our stones captured
-      // Give massive bonus to ensure this is always selected
-      totalScore += 1500;
-      reasons.add('IMMEDIATE_CAPTURE_BLOCK: +1500');
+    // CRITICAL: Scale by stones at risk - saving 1 stone != saving 5 stones
+    // MUST outweigh CRITICAL_ATTACK to prevent AI from attacking while being captured
+    if (immediateCaptureBlocks.containsKey(pos)) {
+      final stonesAtRisk = immediateCaptureBlocks[pos]!;
+
+      // Base bonus scales with stones at risk:
+      // 1 stone: 500, 2 stones: 1000, 3 stones: 1500, 4+ stones: 2000
+      // Higher base than CRITICAL_ATTACK (600) to ensure defense takes priority
+      final baseBonus = min(2000, 500 * stonesAtRisk);
+      totalScore += baseBonus;
+      reasons.add('IMMEDIATE_CAPTURE_BLOCK($stonesAtRisk stones): +$baseBonus');
 
       // Additional bonus if this move improves escape for endangered groups
       for (final group in cache.aiGroups) {
@@ -229,8 +254,30 @@ class AiEngine {
     }
     // ENCIRCLEMENT BLOCK - Important but not as urgent as immediate capture
     // These reduce escape routes but don't immediately capture
-    else if (encirclementBlocks.contains(pos)) {
-      // Check if we have any endangered groups (for bonus scaling)
+    // CRITICAL: Scale by stones at risk AND check if blocking is actually effective
+    else if (encirclementBlocks.containsKey(pos)) {
+      final stonesAtRisk = encirclementBlocks[pos]!;
+      final totalGapCount = encirclementBlocks.length;
+
+      // CRITICAL CHECK: Is this blocking move actually effective?
+      // If there are adjacent gaps that ALSO block the same group, blocking this one is futile
+      // (opponent will just play the adjacent gap next turn)
+      int adjacentGapCount = 0;
+      for (final adj in pos.adjacentPositions) {
+        if (encirclementBlocks.containsKey(adj)) {
+          adjacentGapCount++;
+        }
+      }
+
+      // Also check for nearby gaps (within 2 cells) - these form the encirclement perimeter
+      int nearbyGapCount = 0;
+      for (final gapPos in encirclementBlocks.keys) {
+        if (gapPos == pos) continue;
+        final dist = (gapPos.x - pos.x).abs() + (gapPos.y - pos.y).abs();
+        if (dist <= 3) nearbyGapCount++;
+      }
+
+      // Check urgency based on edge exits of the endangered group
       int minGroupExits = 999;
       for (final group in cache.aiGroups) {
         if (group.edgeExitCount < minGroupExits) {
@@ -238,28 +285,68 @@ class AiEngine {
         }
       }
 
-      // Scale bonus based on urgency
-      int blockBonus;
+      // Base bonus by urgency
+      int urgencyBonus;
       if (minGroupExits <= 2) {
-        blockBonus = 800; // Very urgent - almost captured
+        urgencyBonus = 400; // Very urgent - almost captured
       } else if (minGroupExits <= 4) {
-        blockBonus = 600; // Important
+        urgencyBonus = 300; // Important
       } else if (minGroupExits <= 6) {
-        blockBonus = 400; // Moderate
+        urgencyBonus = 200; // Moderate
       } else {
-        blockBonus = 300; // Still useful
+        urgencyBonus = 150; // Still useful
+      }
+
+      // Scale by stones at risk: multiply by sqrt(stones) to give larger groups more priority
+      // but not linearly (to avoid completely ignoring small groups)
+      final stoneMultiplier = stonesAtRisk >= 4 ? 2.0 : (stonesAtRisk >= 2 ? 1.5 : 1.0);
+      int blockBonus = (urgencyBonus * stoneMultiplier).toInt();
+
+      // HOPELESS CHECK: If there are MANY gaps (8+), blocking is nearly hopeless
+      // The encirclement is too wide - opponent can always extend elsewhere
+      // AI should focus on escape or counterattack instead
+      if (totalGapCount >= 8) {
+        // Check if gaps span multiple edges (truly hopeless - can't close from one side)
+        final gapsOnMultipleEdges = _gapsSpanMultipleEdges(encirclementBlocks.keys, board.size);
+        if (gapsOnMultipleEdges) {
+          // Gaps on multiple edges = nearly impossible to close
+          blockBonus = (blockBonus * 0.05).toInt(); // Reduce to 5%
+          reasons.add('MULTI_EDGE_HOPELESS($totalGapCount gaps): -${(urgencyBonus * stoneMultiplier * 0.95).toInt()}');
+        } else {
+          // Many gaps but on one side = still very hard
+          blockBonus = (blockBonus * 0.10).toInt(); // Reduce to 10%
+          reasons.add('HOPELESS_DEFENSE($totalGapCount gaps): -${(urgencyBonus * stoneMultiplier * 0.90).toInt()}');
+        }
+      } else if (totalGapCount >= 5) {
+        // Several gaps = blocking buys some time but not much
+        blockBonus = (blockBonus * 0.4).toInt(); // Reduce to 40%
+        reasons.add('WIDE_ENCIRCLEMENT($totalGapCount gaps): -${(urgencyBonus * stoneMultiplier * 0.6).toInt()}');
+      }
+      // FUTILITY CHECK: If there are adjacent gaps, blocking this one won't help
+      // Opponent will just play an adjacent position next turn
+      else if (adjacentGapCount >= 2) {
+        // Multiple adjacent gaps = blocking is nearly useless
+        blockBonus = (blockBonus * 0.1).toInt(); // Reduce to 10%
+        reasons.add('FUTILE_BLOCK($adjacentGapCount adj gaps): -${(urgencyBonus * stoneMultiplier * 0.9).toInt()}');
+      } else if (adjacentGapCount == 1) {
+        // One adjacent gap = blocking buys one turn, somewhat useful
+        blockBonus = (blockBonus * 0.5).toInt(); // Reduce to 50%
+        reasons.add('PARTIAL_BLOCK(1 adj gap): -${(urgencyBonus * stoneMultiplier * 0.5).toInt()}');
       }
 
       totalScore += blockBonus;
-      reasons.add('ENCIRCLEMENT_BLOCK: +$blockBonus');
+      reasons.add('ENCIRCLEMENT_BLOCK($stonesAtRisk stones): +$blockBonus');
 
       // Additional bonus if this move improves escape for endangered groups
+      // This is MORE valuable than futile blocking - actually increases our exits
       for (final group in cache.aiGroups) {
         if (group.edgeExitCount <= 6) {
           final escapeAfter = _checkEscapePathDetailed(newBoard, group.stones.first, aiColor);
           final improvement = escapeAfter.edgeExitCount - group.edgeExitCount;
           if (improvement > 0) {
-            final improvementBonus = improvement * 30;
+            // BOOST: Escape improvement is very valuable when blocking is hopeless
+            final hopelessMultiplier = totalGapCount >= 8 ? 3.0 : (totalGapCount >= 5 ? 2.0 : (adjacentGapCount > 0 ? 1.5 : 1.0));
+            final improvementBonus = (improvement * 40 * hopelessMultiplier).toInt();
             totalScore += improvementBonus;
             reasons.add('ESCAPE_IMPROVE(+$improvement exits): +$improvementBonus');
             break; // Only count once
@@ -271,7 +358,7 @@ class AiEngine {
     // COUNTER-ATTACK: If this is a critical attack position, give high priority
     // This competes with ENCIRCLEMENT_BLOCK but NOT with IMMEDIATE_CAPTURE_BLOCK
     // Key insight: attacking opponent's weak group may be better than passive defense
-    if (criticalAttackPositions.contains(pos) && !immediateCaptureBlocks.contains(pos)) {
+    if (criticalAttackPositions.contains(pos) && !immediateCaptureBlocks.containsKey(pos)) {
       // Check if we're also being encircled - if so, counter-attack is even more valuable
       final hasEndangeredGroups = cache.aiGroups.any((g) => g.edgeExitCount <= 4);
       if (hasEndangeredGroups) {
@@ -285,11 +372,190 @@ class AiEngine {
       }
     }
 
-    // Captures
+    // MULTI-THREAT DAMPER: If we have multiple endangered groups, dampen attack urge
+    // Don't attack when we need to defend multiple fronts
+    final endangeredGroupCount = cache.aiGroups.where((g) => g.edgeExitCount <= 3).length;
+    if (endangeredGroupCount >= 2 && criticalAttackPositions.contains(pos)) {
+      // Calculate stones at risk
+      final stonesAtRisk = cache.aiGroups
+          .where((g) => g.edgeExitCount <= 2)
+          .fold<int>(0, (sum, g) => sum + g.stones.length);
+
+      // Check if attack would capture more than we'd lose (worthy attack exception)
+      bool isWorthyAttack = false;
+      int potentialCaptureStones = 0;
+      for (final oppGroup in cache.opponentGroups) {
+        if (oppGroup.edgeExitCount <= 2 && _isGroupNearPosition(oppGroup, pos, 2)) {
+          // Verify we can complete capture soon (within ~2 moves)
+          if (oppGroup.edgeExitCount <= 2) {
+            potentialCaptureStones += oppGroup.stones.length;
+          }
+        }
+      }
+      if (potentialCaptureStones > stonesAtRisk && potentialCaptureStones >= 3) {
+        isWorthyAttack = true;
+      }
+
+      if (!isWorthyAttack) {
+        // Dampen attack bonus when we need to defend multiple fronts
+        final dampenFactor = endangeredGroupCount >= 3 ? 0.4 : 0.6;
+        final dampenAmount = (600 * (1 - dampenFactor)).toInt();
+        totalScore -= dampenAmount;
+        reasons.add('MULTI_THREAT_DAMPEN($endangeredGroupCount groups): -$dampenAmount');
+      }
+    }
+
+    // FOUR-FRONT PROTOCOL: When 4+ groups endangered, enter triage mode
+    // Filter out feints first to get real threat count
+    int realThreats = 0;
+    _GroupInfo? priorityGroup;
+    double bestSaveValue = 0;
+    for (final group in cache.aiGroups) {
+      if (group.edgeExitCount <= 3) {
+        // Fast-path: edgeExitCount == 1 is ALWAYS real (dies next turn)
+        if (group.edgeExitCount == 1) {
+          realThreats++;
+          final saveValue = group.stones.length.toDouble() * 2; // High priority
+          if (saveValue > bestSaveValue) {
+            bestSaveValue = saveValue;
+            priorityGroup = group;
+          }
+        } else if (!_isLikelyFeint(group, board, aiColor.opponent)) {
+          realThreats++;
+          final saveValue = group.stones.length * group.edgeExitCount.toDouble();
+          if (saveValue > bestSaveValue) {
+            bestSaveValue = saveValue;
+            priorityGroup = group;
+          }
+        }
+      }
+    }
+
+    if (realThreats >= 4 && priorityGroup != null) {
+      // Enter four-front protocol: prioritize highest value group
+      if (_isGroupNearPosition(priorityGroup, pos, 2)) {
+        if (immediateCaptureBlocks.containsKey(pos) || encirclementBlocks.containsKey(pos)) {
+          totalScore += 300;
+          reasons.add('FOUR_FRONT_PRIORITY: +300');
+        }
+      }
+      // Deprioritize non-priority groups
+      for (final group in cache.aiGroups) {
+        if (group != priorityGroup && group.edgeExitCount <= 2) {
+          if (_isGroupNearPosition(group, pos, 2) && !_isGroupNearPosition(priorityGroup, pos, 3)) {
+            totalScore -= 100;
+            reasons.add('TRIAGE_DEPRIORITIZE: -100');
+          }
+        }
+      }
+    }
+
+    // FIVE-FRONT CRISIS MODE: When 5+ real threats, maximize survival value per stone
+    if (realThreats >= 5) {
+      final totalStonesAtRisk = cache.aiGroups
+          .where((g) => g.edgeExitCount <= 3)
+          .fold<int>(0, (sum, g) => sum + g.stones.length);
+
+      if (totalStonesAtRisk > 0 && immediateCaptureBlocks.containsKey(pos)) {
+        final stonesSaved = immediateCaptureBlocks[pos]!;
+        final survivalValue = stonesSaved / totalStonesAtRisk;
+
+        if (survivalValue >= 0.3) {
+          totalScore += 500;
+          reasons.add('CRISIS_HIGH_VALUE_SAVE: +500');
+        } else if (survivalValue >= 0.15) {
+          totalScore += 200;
+          reasons.add('CRISIS_MED_VALUE_SAVE: +200');
+        }
+      }
+
+      // In crisis, don't waste moves on low-value saves
+      if (encirclementBlocks.containsKey(pos) && !immediateCaptureBlocks.containsKey(pos)) {
+        final stonesBlocked = encirclementBlocks[pos]!;
+        final blockValue = totalStonesAtRisk > 0 ? stonesBlocked / totalStonesAtRisk : 0.0;
+        if (blockValue < 0.2) {
+          totalScore -= 150;
+          reasons.add('CRISIS_LOW_VALUE_BLOCK: -150');
+        }
+      }
+    }
+
+    // Captures - VERY HIGH PRIORITY
+    // Actually capturing stones is almost always the best move
+    // Capturing is nearly always beneficial - removes opponent stones permanently
+    // Base score must be high enough to compete with IMMEDIATE_CAPTURE_BLOCK
     if (capturedCount > 0) {
-      final captureScore = capturedCount * 80;
+      // Base: 500 per stone, with bonus for multiple captures
+      // 1 stone: 500, 2 stones: 1150, 3 stones: 1800, 4 stones: 2450
+      // This makes captures competitive with defense when stones are at stake
+      int captureScore = capturedCount * 500 + (capturedCount > 1 ? (capturedCount - 1) * 150 : 0);
+
+      // SYNERGY BONUS: If this capture ALSO blocks an encirclement or defends our stones,
+      // it's doubly valuable - we attack AND defend in one move!
+      // This makes capture + defense much better than pure defense
+      bool isDefensiveCapture = false;
+      int defenseSynergyBonus = 0;
+
+      if (immediateCaptureBlocks.containsKey(pos)) {
+        // Capturing WHILE blocking immediate capture = huge synergy
+        final stonesDefended = immediateCaptureBlocks[pos]!;
+        defenseSynergyBonus = min(1000, stonesDefended * 150);
+        isDefensiveCapture = true;
+        reasons.add('CAPTURE_DEFENDS($stonesDefended stones): +$defenseSynergyBonus');
+      } else if (encirclementBlocks.containsKey(pos)) {
+        // Capturing WHILE blocking encirclement = good synergy
+        final stonesDefended = encirclementBlocks[pos]!;
+        defenseSynergyBonus = min(600, stonesDefended * 80);
+        isDefensiveCapture = true;
+        reasons.add('CAPTURE_BLOCKS_ENCIRCLE($stonesDefended stones): +$defenseSynergyBonus');
+      }
+
+      // CRITICAL CHECK: Does this capture ELIMINATE the threat at a nearby blocking position?
+      // If an immediate capture block is needed at an adjacent position, check if capturing here
+      // removes the attacker's stones that were creating that threat
+      if (!isDefensiveCapture && immediateCaptureBlocks.isNotEmpty) {
+        // Check if any immediate capture block position is now safe after this capture
+        // (The captured stones might have been the ones creating the threat)
+        for (final blockPos in immediateCaptureBlocks.keys) {
+          // Check if capture position is within 2 cells of the block position
+          final dist = (blockPos.x - pos.x).abs() + (blockPos.y - pos.y).abs();
+          if (dist <= 2) {
+            // Check if the threat still exists after this capture
+            final opponentColor = aiColor.opponent;
+            final threatResult = CaptureLogic.processMove(newBoard, blockPos, opponentColor, existingEnclosures: enclosures);
+            // If opponent playing at blockPos can no longer capture, our capture eliminated the threat!
+            if (!threatResult.isValid || threatResult.captureResult == null || threatResult.captureResult!.captureCount == 0) {
+              final stonesDefended = immediateCaptureBlocks[blockPos]!;
+              defenseSynergyBonus = min(1200, stonesDefended * 100 + capturedCount * 200);
+              isDefensiveCapture = true;
+              reasons.add('CAPTURE_ELIMINATES_THREAT($stonesDefended stones saved): +$defenseSynergyBonus');
+              break;
+            }
+          }
+        }
+      }
+
+      // Additional check: Does this capture break an opponent's attacking formation?
+      // If capturing removes stones that were threatening our groups, extra bonus
+      if (!isDefensiveCapture && cache.aiGroups.any((g) => g.edgeExitCount <= 4)) {
+        // We have endangered groups - check if capture relieves pressure
+        // After capture, check if our endangered group has more exits
+        for (final group in cache.aiGroups) {
+          if (group.edgeExitCount <= 4) {
+            final escapeAfter = _checkEscapePathDetailed(newBoard, group.stones.first, aiColor);
+            final improvement = escapeAfter.edgeExitCount - group.edgeExitCount;
+            if (improvement > 0) {
+              defenseSynergyBonus = improvement * 100;
+              reasons.add('CAPTURE_RELIEVES_PRESSURE(+$improvement exits): +$defenseSynergyBonus');
+              break;
+            }
+          }
+        }
+      }
+
+      captureScore += defenseSynergyBonus;
       totalScore += captureScore;
-      reasons.add('CAPTURE($capturedCount): +$captureScore');
+      reasons.add('CAPTURE($capturedCount): +${capturedCount * 500 + (capturedCount > 1 ? (capturedCount - 1) * 150 : 0)}');
     }
 
     // Enclosure completion
@@ -339,6 +605,40 @@ class AiEngine {
       final bonus = escapeAfterMove.wideCorridorCount * 20;
       totalScore += bonus;
       reasons.add('WIDE_CORRIDORS(${escapeAfterMove.wideCorridorCount}): +$bonus');
+    }
+
+    // ESCAPE CREATION BONUS: If we have endangered groups, prioritize moves that create escape routes
+    // This is CRITICAL when blocking is futile - better to escape than waste moves blocking
+    bool hasEndangeredGroup = false;
+    int bestGroupExitsBefore = 0;
+    Position? endangeredGroupStone;
+    for (final group in cache.aiGroups) {
+      if (group.edgeExitCount <= 6 && group.stones.length >= 3) {
+        hasEndangeredGroup = true;
+        if (group.edgeExitCount > bestGroupExitsBefore || endangeredGroupStone == null) {
+          bestGroupExitsBefore = group.edgeExitCount;
+          endangeredGroupStone = group.stones.first;
+        }
+      }
+    }
+
+    if (hasEndangeredGroup && endangeredGroupStone != null) {
+      // Check if this move increases escape for our endangered group
+      final escapeAfterForGroup = _checkEscapePathDetailed(newBoard, endangeredGroupStone, aiColor);
+      final exitImprovement = escapeAfterForGroup.edgeExitCount - bestGroupExitsBefore;
+
+      if (exitImprovement > 0) {
+        // This move creates new escape routes! Very valuable.
+        // More valuable than futile blocking
+        final escapeBonus = exitImprovement * 100;
+        totalScore += escapeBonus;
+        reasons.add('ESCAPE_CREATION(+$exitImprovement exits): +$escapeBonus');
+      } else if (exitImprovement < 0) {
+        // This move REDUCES our escape - bad!
+        final escapePenalty = (-exitImprovement) * 50;
+        totalScore -= escapePenalty;
+        reasons.add('ESCAPE_REDUCTION($exitImprovement exits): -$escapePenalty');
+      }
     }
 
     // Surrounded penalty
@@ -407,7 +707,7 @@ class AiEngine {
     }
 
     // Tactical impact check
-    final isBlockingMove = immediateCaptureBlocks.contains(pos) || encirclementBlocks.contains(pos);
+    final isBlockingMove = immediateCaptureBlocks.containsKey(pos) || encirclementBlocks.containsKey(pos);
     if (capturedCount == 0 && newEnclosures.isEmpty && !isBlockingMove) {
       bool hasImpact = false;
       for (final group in cache.aiGroups) {
@@ -802,6 +1102,70 @@ class AiEngine {
     }
 
     return false;
+  }
+
+  /// Result of doomed position check
+  ({bool isDoomed, String reason}) _isPositionDoomed(Board originalBoard, Board newBoard, Position pos, StoneColor aiColor, List<Enclosure> enclosures) {
+    final opponentColor = aiColor.opponent;
+
+    // Check escape path after our move
+    final escapeAfter = _checkEscapePathDetailed(newBoard, pos, aiColor);
+
+    // If we have good escape, not doomed
+    if (escapeAfter.edgeExitCount >= 3) {
+      return (isDoomed: false, reason: '');
+    }
+
+    // If large open region, not doomed
+    if (escapeAfter.emptyRegion.length > 15) {
+      return (isDoomed: false, reason: '');
+    }
+
+    // Find all positions where opponent could play to complete encirclement
+    // These are empty positions OUTSIDE our escape region that border it
+    final encirclementCompletionPoints = <Position>[];
+
+    for (final emptyPos in escapeAfter.emptyRegion) {
+      for (final adj in emptyPos.adjacentPositions) {
+        if (!newBoard.isValidPosition(adj)) continue;
+        if (newBoard.isEmpty(adj) && !escapeAfter.emptyRegion.contains(adj)) {
+          // This is an empty position outside our region - potential encirclement point
+          if (!encirclementCompletionPoints.contains(adj)) {
+            encirclementCompletionPoints.add(adj);
+          }
+        }
+      }
+    }
+
+    // If only 1-2 completion points, check if opponent playing there would capture us
+    if (encirclementCompletionPoints.length <= 2) {
+      for (final completionPoint in encirclementCompletionPoints) {
+        // Simulate opponent playing at the completion point
+        final afterOpponent = newBoard.placeStone(completionPoint, opponentColor);
+
+        // Check if this creates an enclosure that captures our stone
+        final captureResult = CaptureLogic.processMove(
+          newBoard, completionPoint, opponentColor,
+          existingEnclosures: enclosures
+        );
+
+        if (captureResult.isValid && captureResult.captureResult != null) {
+          final captured = captureResult.captureResult!.captureCount;
+          if (captured > 0) {
+            // Opponent can capture us with 1 move - we're doomed!
+            return (isDoomed: true, reason: '1 move to capture $captured');
+          }
+        }
+
+        // Even if not immediate capture, check if we'd be completely sealed
+        final escapeAfterOpponent = _checkEscapePathDetailed(afterOpponent, pos, aiColor);
+        if (escapeAfterOpponent.edgeExitCount == 0 || !escapeAfterOpponent.canEscape) {
+          return (isDoomed: true, reason: '1 move to seal');
+        }
+      }
+    }
+
+    return (isDoomed: false, reason: '');
   }
 
   /// Check if a position is in a "danger zone" - an area about to be enclosed
@@ -1879,6 +2243,30 @@ class AiEngine {
       }
     }
 
+    // ENDGAME AGGRESSION: After move 180, boost offensive play to maintain tempo
+    if (board.stones.length >= 180 && endangeredAiGroups <= 1) {
+      // Late game - territory is mostly defined, need to be aggressive
+      for (final group in cache.opponentGroups) {
+        if (group.edgeExitCount <= 4 && _isGroupNearPosition(group, pos, 2)) {
+          return 45; // Boosted from 25 to 45 in endgame
+        }
+      }
+    }
+
+    // ENDGAME PASSIVE PENALTY: After move 180, penalize purely defensive moves
+    if (board.stones.length >= 180 && endangeredAiGroups <= 1) {
+      bool pureDefense = true;
+      for (final group in cache.opponentGroups) {
+        if (_isGroupNearPosition(group, pos, 3)) {
+          pureDefense = false;
+          break;
+        }
+      }
+      if (pureDefense && !criticalBlockingPositions.contains(pos)) {
+        return -20; // Penalty for passive late-game play
+      }
+    }
+
     // If we have more attackable targets than endangered groups, boost offense
     if (attackableOpponentGroups > endangeredAiGroups && endangeredAiGroups <= 1) {
       // Check if this move is offensive (attacks opponent group)
@@ -2048,9 +2436,9 @@ class AiEngine {
   /// Players who establish an edge anchor in moves 1-10 win 71% of the time
   /// BALANCED: Only active for first 8 stones, reduced bonuses to not overshadow engagement
   double _evaluateAnchorFormation(Board board, Position pos, StoneColor aiColor) {
-    // Only apply anchor logic for the very first few moves (8 stones = 4 moves each)
+    // Only apply anchor logic for the very first few moves (12 stones = 6 moves each)
     // After that, engagement with opponent is more important
-    if (board.stones.length > 8) {
+    if (board.stones.length > 12) {
       return 0; // Don't encourage edge-only play after opening
     }
 
@@ -2064,6 +2452,33 @@ class AiEngine {
       score += 10; // One off edge (was 30)
     }
     // REMOVED: No penalty for interior positions - let engagement bonuses handle it
+
+    // CORNER BONUS: Corners provide 2-edge escape potential, strategically valuable
+    bool isCorner = (pos.x <= 2 && pos.y <= 2) ||
+                    (pos.x <= 2 && pos.y >= board.size - 3) ||
+                    (pos.x >= board.size - 3 && pos.y <= 2) ||
+                    (pos.x >= board.size - 3 && pos.y >= board.size - 3);
+
+    if (isCorner) {
+      // Check if we already have a stone in any corner quadrant
+      bool alreadyHaveCorner = false;
+      for (final entry in board.stones.entries) {
+        if (entry.value == aiColor) {
+          bool stoneInCorner = (entry.key.x <= 4 && entry.key.y <= 4) ||
+                               (entry.key.x <= 4 && entry.key.y >= board.size - 5) ||
+                               (entry.key.x >= board.size - 5 && entry.key.y <= 4) ||
+                               (entry.key.x >= board.size - 5 && entry.key.y >= board.size - 5);
+          if (stoneInCorner) {
+            alreadyHaveCorner = true;
+            break;
+          }
+        }
+      }
+
+      if (!alreadyHaveCorner) {
+        score += 20; // Corner bonus only if no corner presence yet
+      }
+    }
 
     // Check if we're forming a 2x2 anchor pattern
     int adjacentFriendly = 0;
@@ -2148,6 +2563,49 @@ class AiEngine {
     final dx = (a.x - b.x).abs();
     final dy = (a.y - b.y).abs();
     return (dx + dy) == 1;
+  }
+
+  /// Helper: Check if gaps span multiple edges of the board
+  /// Used to detect truly hopeless defense situations
+  bool _gapsSpanMultipleEdges(Iterable<Position> gaps, int boardSize) {
+    bool hasTop = false, hasBottom = false, hasLeft = false, hasRight = false;
+    for (final gap in gaps) {
+      if (gap.y <= 3) hasTop = true;
+      if (gap.y >= boardSize - 4) hasBottom = true;
+      if (gap.x <= 3) hasLeft = true;
+      if (gap.x >= boardSize - 4) hasRight = true;
+    }
+    int edgeCount = (hasTop ? 1 : 0) + (hasBottom ? 1 : 0) + (hasLeft ? 1 : 0) + (hasRight ? 1 : 0);
+    return edgeCount >= 2;
+  }
+
+  /// Helper: Check if an attack on a group is likely a feint (not committed)
+  /// A feint is when opponent has stones near our group but isn't tightening encirclement
+  bool _isLikelyFeint(_GroupInfo group, Board board, StoneColor opponentColor) {
+    // Check if opponent stones near this group have been static (no recent additions)
+    int opponentAdjacent = 0;
+    int opponentAdjacentWithEscape = 0;
+
+    for (final boundary in group.boundaryEmpties) {
+      for (final adj in boundary.adjacentPositions) {
+        if (!board.isValidPosition(adj)) continue;
+        if (board.getStoneAt(adj) == opponentColor) {
+          opponentAdjacent++;
+          // Check if this opponent stone itself has good escape
+          final oppEscape = _checkEscapePathDetailed(board, adj, opponentColor);
+          if (oppEscape.edgeExitCount >= 4) {
+            opponentAdjacentWithEscape++;
+          }
+        }
+      }
+    }
+
+    // If opponent stones near us are well-connected (not committed to attack), likely feint
+    if (opponentAdjacent > 0 && opponentAdjacentWithEscape == opponentAdjacent) {
+      return true; // All threatening stones have escape = likely feint
+    }
+
+    return false;
   }
 
   /// Evaluate if this move progresses toward completing an encirclement of opponent stones
@@ -2472,22 +2930,48 @@ class AiEngine {
 
     final groupSize = targetGroup.stones.length;
 
-    // Small groups (1-2 stones) with low escape chances - consider sacrificing
-    if (groupSize <= 2 && targetGroup.edgeExitCount <= 2) {
+    // Only consider sacrifice if opponent is actively threatening
+    bool opponentThreatening = false;
+    for (final adj in targetGroup.boundaryEmpties) {
+      for (final adjAdj in adj.adjacentPositions) {
+        if (!board.isValidPosition(adjAdj)) continue;
+        if (board.getStoneAt(adjAdj) == aiColor.opponent) {
+          opponentThreatening = true;
+          break;
+        }
+      }
+      if (opponentThreatening) break;
+    }
+
+    if (!opponentThreatening) {
+      return 0; // Don't sacrifice if opponent isn't actively attacking this group
+    }
+
+    // GLOBAL AWARENESS: Check if opponent is building elsewhere while we save this group
+    int opponentMomentum = 0;
+    for (final oppGroup in cache.opponentGroups) {
+      // Count opponent groups that are expanding (have good escape and room to grow)
+      if (oppGroup.edgeExitCount >= 5 && oppGroup.stones.length >= 4) {
+        if (oppGroup.boundaryEmpties.length >= 6) {
+          opponentMomentum++;
+        }
+      }
+    }
+
+    // Extended sacrifice evaluation to 3-4 stone groups
+    if (groupSize <= 4 && targetGroup.edgeExitCount <= 2) {
       // Estimate cost to save this group
-      // How many moves would it take to secure this group?
       int movesToSave = 0;
       if (targetGroup.edgeExitCount == 1) {
-        movesToSave = 3; // Very hard to save, need multiple moves
+        movesToSave = groupSize + 2; // More stones = more moves needed
       } else if (targetGroup.edgeExitCount == 2) {
-        movesToSave = 2; // Needs reinforcement
+        movesToSave = groupSize;
       } else {
-        movesToSave = 1;
+        movesToSave = groupSize > 1 ? groupSize - 1 : 1;
       }
 
-      // If cost to save >= 3 moves, sacrifice and use moves for attack instead
-      if (movesToSave >= 3) {
-        // Check if we could capture something valuable with those moves instead
+      // If cost to save >= group size + 1, consider sacrificing
+      if (movesToSave >= groupSize + 1) {
         int potentialCaptures = 0;
         for (final oppGroup in cache.opponentGroups) {
           if (oppGroup.edgeExitCount <= 2) {
@@ -2496,14 +2980,28 @@ class AiEngine {
         }
 
         if (potentialCaptures >= groupSize) {
-          return -50; // Don't save - sacrifice is better (negative discourages saving)
+          // Stronger sacrifice signal for larger groups
+          return -40 - (groupSize * 10);
         }
+      }
+
+      // If opponent has 2+ expanding groups while we're saving a small group, reconsider
+      if (opponentMomentum >= 2 && groupSize <= 3) {
+        return -30; // Don't waste moves on small saves when opponent is building momentum
       }
     }
 
-    // Larger groups are worth saving
-    if (groupSize >= 3) {
+    // Larger groups (5+) are worth saving
+    if (groupSize >= 5) {
       return groupSize * 10; // Worth saving
+    }
+
+    // Medium groups (3-4) - context dependent
+    if (groupSize >= 3) {
+      // Worth saving if opponent momentum is low
+      if (opponentMomentum < 2) {
+        return groupSize * 8;
+      }
     }
 
     return 0;
@@ -2685,26 +3183,38 @@ class AiEngine {
   /// - immediateCaptureBlocks: positions where opponent playing would ACTUALLY CAPTURE stones
   ///   (CaptureLogic.processMove returns captureCount > 0 or creates enclosure)
   /// - encirclementBlocks: positions that would reduce escape but not immediately capture
-  ({Set<Position> immediateCaptureBlocks, Set<Position> encirclementBlocks}) _findCriticalBlockingPositionsDetailed(Board board, StoneColor aiColor, List<Enclosure> enclosures, _TurnCache cache) {
-    final immediateCaptureBlocks = <Position>{};
-    final encirclementBlocks = <Position>{};
+  ({Map<Position, int> immediateCaptureBlocks, Map<Position, int> encirclementBlocks}) _findCriticalBlockingPositionsDetailed(Board board, StoneColor aiColor, List<Enclosure> enclosures, _TurnCache cache) {
+    // Maps position -> stones at risk (for proper prioritization)
+    final immediateCaptureBlocks = <Position, int>{};
+    final encirclementBlocks = <Position, int>{};
     final opponentColor = aiColor.opponent;
 
     // Check all boundary empties of AI groups - these are potential capture points
     for (final group in cache.aiGroups) {
+      final groupSize = group.stones.length;
+
       // Check each boundary empty to see if opponent placing there would ACTUALLY CAPTURE
       // This is the STRICTEST check - only positions where CaptureLogic triggers capture
       for (final emptyPos in group.boundaryEmpties) {
         final opponentMoveResult = CaptureLogic.processMove(board, emptyPos, opponentColor, existingEnclosures: enclosures);
 
         if (opponentMoveResult.isValid && opponentMoveResult.captureResult != null) {
-          if (opponentMoveResult.captureResult!.captureCount > 0) {
+          final captureCount = opponentMoveResult.captureResult!.captureCount;
+          if (captureCount > 0) {
             // Opponent could ACTUALLY CAPTURE here - IMMEDIATE threat!
-            immediateCaptureBlocks.add(emptyPos);
+            // Track actual capture count, or group size if creating enclosure
+            final stonesAtRisk = captureCount > 0 ? captureCount : groupSize;
+            // Keep the maximum if already tracked
+            if (!immediateCaptureBlocks.containsKey(emptyPos) || immediateCaptureBlocks[emptyPos]! < stonesAtRisk) {
+              immediateCaptureBlocks[emptyPos] = stonesAtRisk;
+            }
           }
           if (opponentMoveResult.captureResult!.newEnclosures.isNotEmpty) {
             // Opponent could create an enclosure with capture - also immediate threat!
-            immediateCaptureBlocks.add(emptyPos);
+            // Enclosure typically traps all stones in the group
+            if (!immediateCaptureBlocks.containsKey(emptyPos) || immediateCaptureBlocks[emptyPos]! < groupSize) {
+              immediateCaptureBlocks[emptyPos] = groupSize;
+            }
           }
         }
       }
@@ -2713,15 +3223,19 @@ class AiEngine {
       // These might not be adjacent to our stones but still cause capture
       // Run for ALL groups, not just endangered ones - CaptureLogic will only
       // return captures if the wall is actually forming around our stones
-      final wallGapCaptures = _findWallGapCapturePositions(board, group, opponentColor, enclosures);
-      immediateCaptureBlocks.addAll(wallGapCaptures);
+      final wallGapCaptures = _findWallGapCapturePositionsWithCount(board, group, opponentColor, enclosures);
+      for (final entry in wallGapCaptures.entries) {
+        if (!immediateCaptureBlocks.containsKey(entry.key) || immediateCaptureBlocks[entry.key]! < entry.value) {
+          immediateCaptureBlocks[entry.key] = entry.value;
+        }
+      }
 
       // Check if boundary empties would severely reduce escape
       // These are encirclement blocks, NOT immediate capture blocks
       // The distinction is crucial: "sealing" != "capturing"
       for (final emptyPos in group.boundaryEmpties) {
         // Skip if already marked as immediate capture
-        if (immediateCaptureBlocks.contains(emptyPos)) continue;
+        if (immediateCaptureBlocks.containsKey(emptyPos)) continue;
 
         // Simulate opponent placing at this boundary position
         final simulatedBoard = board.placeStone(emptyPos, opponentColor);
@@ -2733,11 +3247,15 @@ class AiEngine {
         // Sealing (edgeExitCount == 0) is SERIOUS but not same as immediate capture
         // It's an encirclement block with high urgency
         if (!escapeAfter.canEscape || escapeAfter.edgeExitCount == 0) {
-          encirclementBlocks.add(emptyPos);
+          if (!encirclementBlocks.containsKey(emptyPos) || encirclementBlocks[emptyPos]! < groupSize) {
+            encirclementBlocks[emptyPos] = groupSize;
+          }
         }
         // Leave only 1-2 exits = also dangerous
         else if (escapeAfter.edgeExitCount <= 2 && group.edgeExitCount > 2) {
-          encirclementBlocks.add(emptyPos);
+          if (!encirclementBlocks.containsKey(emptyPos) || encirclementBlocks[emptyPos]! < groupSize) {
+            encirclementBlocks[emptyPos] = groupSize;
+          }
         }
       }
 
@@ -2749,8 +3267,8 @@ class AiEngine {
           for (final adj in stone.adjacentPositions) {
             if (!board.isValidPosition(adj)) continue;
             if (!board.isEmpty(adj)) continue;
-            if (immediateCaptureBlocks.contains(adj)) continue;
-            if (encirclementBlocks.contains(adj)) continue;
+            if (immediateCaptureBlocks.containsKey(adj)) continue;
+            if (encirclementBlocks.containsKey(adj)) continue;
 
             // Check if opponent placing here would reduce our escape
             final simulatedBoard = board.placeStone(adj, opponentColor);
@@ -2758,11 +3276,11 @@ class AiEngine {
 
             // Sealing = encirclement block (high priority)
             if (!escapeAfter.canEscape || escapeAfter.edgeExitCount == 0) {
-              encirclementBlocks.add(adj);
+              encirclementBlocks[adj] = groupSize;
             }
             // Losing 2+ exits is serious
             else if (escapeAfter.edgeExitCount < group.edgeExitCount - 1) {
-              encirclementBlocks.add(adj);
+              encirclementBlocks[adj] = groupSize;
             }
           }
         }
@@ -2771,8 +3289,8 @@ class AiEngine {
         // These are empty positions between opponent stones that form a wall
         final wallGaps = _findWallGapsAroundGroup(board, group, opponentColor);
         for (final gap in wallGaps) {
-          if (!immediateCaptureBlocks.contains(gap) && !encirclementBlocks.contains(gap)) {
-            encirclementBlocks.add(gap);
+          if (!immediateCaptureBlocks.containsKey(gap) && !encirclementBlocks.containsKey(gap)) {
+            encirclementBlocks[gap] = groupSize;
           }
         }
       }
@@ -2783,18 +3301,26 @@ class AiEngine {
 
   /// Find positions where opponent filling a gap in their wall would capture AI stones
   /// This catches enclosure completions that aren't adjacent to AI stones
+  ///
+  /// CRITICAL FIX: The "nearOpponent" check was too restrictive. An encirclement-completing
+  /// move might not be directly adjacent to opponent stones - it could be a gap in the
+  /// ring that, when filled by opponent, completes the encirclement.
+  /// Example: Opponent stones at (6,10) and (6,12), gap at (5,11) - position (5,11) is
+  /// NOT adjacent to any opponent stone but filling it completes the encirclement.
   Set<Position> _findWallGapCapturePositions(Board board, _GroupInfo group, StoneColor opponentColor, List<Enclosure> enclosures) {
     final capturePositions = <Position>{};
 
-    // Strategy: Find empty positions near opponent stones that are near our group
-    // Test each one to see if opponent playing there would capture
+    // Strategy: Find empty positions that could complete an encirclement around our group
+    // The key insight is that a capture-completing position may not be directly adjacent
+    // to opponent stones, but it WILL be in the "escape zone" boundary of our group
 
     // Get all positions within a certain radius of our group
-    // Radius of 5 covers most encirclement shapes where the gap may be
-    // several cells away from the nearest AI stone
+    // Radius of 5 covers most encirclement shapes
     final searchRadius = 5;
     final positionsToCheck = <Position>{};
 
+    // APPROACH 1: Check positions near opponent stones (original logic, but relaxed)
+    // Now checks for positions within 2 cells of opponent stones, not just adjacent
     for (final stone in group.stones) {
       for (int dx = -searchRadius; dx <= searchRadius; dx++) {
         for (int dy = -searchRadius; dy <= searchRadius; dy++) {
@@ -2802,17 +3328,44 @@ class AiEngine {
           if (!board.isValidPosition(checkPos)) continue;
           if (!board.isEmpty(checkPos)) continue;
 
-          // Position must be near opponent stones (potential wall gap)
+          // Check if position is within 2 cells of any opponent stone
+          // This catches gaps in encirclement rings that aren't directly adjacent
           bool nearOpponent = false;
-          for (final adj in checkPos.adjacentPositions) {
-            if (board.isValidPosition(adj) && board.getStoneAt(adj) == opponentColor) {
-              nearOpponent = true;
-              break;
+          for (int odx = -2; odx <= 2; odx++) {
+            for (int ody = -2; ody <= 2; ody++) {
+              if (odx == 0 && ody == 0) continue;
+              final nearPos = Position(checkPos.x + odx, checkPos.y + ody);
+              if (board.isValidPosition(nearPos) && board.getStoneAt(nearPos) == opponentColor) {
+                nearOpponent = true;
+                break;
+              }
             }
+            if (nearOpponent) break;
           }
           if (nearOpponent) {
             positionsToCheck.add(checkPos);
           }
+        }
+      }
+    }
+
+    // APPROACH 2: For endangered groups (low edge exits), also check the escape boundary
+    // These are positions that, if filled, would reduce our escape routes
+    if (group.edgeExitCount <= 6) {
+      // Get the empty region accessible from our group (the escape zone)
+      final sampleStone = group.stones.first;
+      final escapeResult = _checkEscapePathDetailed(board, sampleStone, opponentColor.opponent);
+
+      // Check positions on the BOUNDARY of this escape zone
+      // (adjacent to the escape zone but not inside it)
+      for (final emptyPos in escapeResult.emptyRegion) {
+        for (final adj in emptyPos.adjacentPositions) {
+          if (!board.isValidPosition(adj)) continue;
+          if (!board.isEmpty(adj)) continue;
+          if (escapeResult.emptyRegion.contains(adj)) continue; // Inside escape zone
+
+          // This position is outside our escape zone - could be an encirclement completion point
+          positionsToCheck.add(adj);
         }
       }
     }
@@ -2844,10 +3397,106 @@ class AiEngine {
     return capturePositions;
   }
 
+  /// Version that returns Map<Position, int> with capture counts
+  Map<Position, int> _findWallGapCapturePositionsWithCount(Board board, _GroupInfo group, StoneColor opponentColor, List<Enclosure> enclosures) {
+    final capturePositions = <Position, int>{};
+
+    // Strategy: Find empty positions that could complete an encirclement around our group
+    // The key insight is that a capture-completing position may not be directly adjacent
+    // to opponent stones, but it WILL be in the "escape zone" boundary of our group
+
+    // Get all positions within a certain radius of our group
+    // Radius of 5 covers most encirclement shapes
+    final searchRadius = 5;
+    final positionsToCheck = <Position>{};
+
+    // APPROACH 1: Check positions near opponent stones (original logic, but relaxed)
+    // Now checks for positions within 2 cells of opponent stones, not just adjacent
+    for (final stone in group.stones) {
+      for (int dx = -searchRadius; dx <= searchRadius; dx++) {
+        for (int dy = -searchRadius; dy <= searchRadius; dy++) {
+          final checkPos = Position(stone.x + dx, stone.y + dy);
+          if (!board.isValidPosition(checkPos)) continue;
+          if (!board.isEmpty(checkPos)) continue;
+
+          // Check if position is within 2 cells of any opponent stone
+          // This catches gaps in encirclement rings that aren't directly adjacent
+          bool nearOpponent = false;
+          for (int odx = -2; odx <= 2; odx++) {
+            for (int ody = -2; ody <= 2; ody++) {
+              if (odx == 0 && ody == 0) continue;
+              final nearPos = Position(checkPos.x + odx, checkPos.y + ody);
+              if (board.isValidPosition(nearPos) && board.getStoneAt(nearPos) == opponentColor) {
+                nearOpponent = true;
+                break;
+              }
+            }
+            if (nearOpponent) break;
+          }
+          if (nearOpponent) {
+            positionsToCheck.add(checkPos);
+          }
+        }
+      }
+    }
+
+    // APPROACH 2: For endangered groups (low edge exits), also check the escape boundary
+    // These are positions that, if filled, would reduce our escape routes
+    if (group.edgeExitCount <= 6) {
+      // Get the empty region accessible from our group (the escape zone)
+      final sampleStone = group.stones.first;
+      final escapeResult = _checkEscapePathDetailed(board, sampleStone, opponentColor.opponent);
+
+      // Check positions on the BOUNDARY of this escape zone
+      // (adjacent to the escape zone but not inside it)
+      for (final emptyPos in escapeResult.emptyRegion) {
+        for (final adj in emptyPos.adjacentPositions) {
+          if (!board.isValidPosition(adj)) continue;
+          if (!board.isEmpty(adj)) continue;
+          if (escapeResult.emptyRegion.contains(adj)) continue; // Inside escape zone
+
+          // This position is outside our escape zone - could be an encirclement completion point
+          positionsToCheck.add(adj);
+        }
+      }
+    }
+
+    // Test each potential wall gap position
+    for (final pos in positionsToCheck) {
+      // Skip if already checked as boundary empty
+      if (group.boundaryEmpties.contains(pos)) continue;
+
+      final opponentMoveResult = CaptureLogic.processMove(
+        board,
+        pos,
+        opponentColor,
+        existingEnclosures: enclosures,
+      );
+
+      if (opponentMoveResult.isValid && opponentMoveResult.captureResult != null) {
+        final captureCount = opponentMoveResult.captureResult!.captureCount;
+        if (captureCount > 0) {
+          // Opponent playing here would capture! Track the count.
+          if (!capturePositions.containsKey(pos) || capturePositions[pos]! < captureCount) {
+            capturePositions[pos] = captureCount;
+          }
+        }
+        if (opponentMoveResult.captureResult!.newEnclosures.isNotEmpty) {
+          // Opponent would create an enclosure - use group size as estimate
+          if (!capturePositions.containsKey(pos) || capturePositions[pos]! < group.stones.length) {
+            capturePositions[pos] = group.stones.length;
+          }
+        }
+      }
+    }
+
+    return capturePositions;
+  }
+
   /// Legacy wrapper - returns all critical positions combined
   Set<Position> _findCriticalBlockingPositions(Board board, StoneColor aiColor, List<Enclosure> enclosures, _TurnCache cache) {
     final detailed = _findCriticalBlockingPositionsDetailed(board, aiColor, enclosures, cache);
-    return {...detailed.immediateCaptureBlocks, ...detailed.encirclementBlocks};
+    return {...detailed.immediateCaptureBlocks.keys, ...detailed.encirclementBlocks.keys};
   }
 
   /// Find critical ATTACK positions - places where AI can severely damage opponent's vulnerable groups
@@ -2857,10 +3506,47 @@ class AiEngine {
     final attackPositions = <Position>{};
     final opponentColor = aiColor.opponent;
 
+    // === PHASE 1: Attack isolated/vulnerable groups ===
     for (final group in cache.opponentGroups) {
-      // Only target vulnerable groups (limited escape routes)
-      if (group.edgeExitCount > 5) continue; // Too safe to attack urgently
-      if (group.stones.length < 2) continue; // Single stone not worth prioritizing
+      // SINGLE STONE ATTACK: Isolated single stones are prime targets
+      // They can be cut off from support or pressured into weak positions
+      if (group.stones.length == 1) {
+        final stone = group.stones.first;
+
+        // Check how connected this stone is to other opponent stones
+        int nearbyOpponentStones = 0;
+        for (int dx = -2; dx <= 2; dx++) {
+          for (int dy = -2; dy <= 2; dy++) {
+            if (dx == 0 && dy == 0) continue;
+            final checkPos = Position(stone.x + dx, stone.y + dy);
+            if (board.isValidPosition(checkPos) && board.getStoneAt(checkPos) == opponentColor) {
+              nearbyOpponentStones++;
+            }
+          }
+        }
+
+        // If truly isolated (0-1 nearby stones), it's a great attack target
+        // Find positions that would pressure/surround it
+        if (nearbyOpponentStones <= 1) {
+          for (final emptyPos in group.boundaryEmpties) {
+            // Simulate and check if it reduces escape
+            final simBoard = board.placeStone(emptyPos, aiColor);
+            final escapeAfter = _checkEscapePathDetailed(simBoard, stone, opponentColor);
+
+            // Critical: would seal the stone
+            if (!escapeAfter.canEscape || escapeAfter.edgeExitCount == 0) {
+              attackPositions.add(emptyPos);
+            } else if (escapeAfter.edgeExitCount <= 3) {
+              // Significant pressure on isolated stone
+              attackPositions.add(emptyPos);
+            }
+          }
+        }
+        continue; // Move to next group
+      }
+
+      // MULTI-STONE GROUPS: Target those with limited escape
+      if (group.edgeExitCount > 8) continue; // Very safe, not worth urgent attack
 
       // Check boundary positions for critical attack opportunities
       for (final emptyPos in group.boundaryEmpties) {
@@ -2911,6 +3597,48 @@ class AiEngine {
             final simBoard = board.placeStone(adj, aiColor);
             final escapeAfter = _checkEscapePathDetailed(simBoard, stone, opponentColor);
             if (escapeAfter.edgeExitCount < group.edgeExitCount) {
+              attackPositions.add(adj);
+            }
+          }
+        }
+      }
+    }
+
+    // === PHASE 2: Find thin connection cuts between different groups ===
+    // When opponent is building an encirclement path, they often have thin chains
+    // between groups - cutting these disrupts the encirclement
+    final opponentGroups = cache.opponentGroups.toList();
+    for (int i = 0; i < opponentGroups.length; i++) {
+      for (int j = i + 1; j < opponentGroups.length; j++) {
+        final group1 = opponentGroups[i];
+        final group2 = opponentGroups[j];
+
+        // Find empty cells that are adjacent to both groups (thin bridges)
+        for (final empty1 in group1.boundaryEmpties) {
+          if (group2.boundaryEmpties.contains(empty1)) {
+            // This empty cell touches both groups - it's a potential cut point!
+            // Check how valuable cutting here would be
+            int adjacentToGroup1 = 0;
+            int adjacentToGroup2 = 0;
+            for (final adj in empty1.adjacentPositions) {
+              if (group1.stones.contains(adj)) adjacentToGroup1++;
+              if (group2.stones.contains(adj)) adjacentToGroup2++;
+            }
+
+            // If this is the ONLY connection between the groups, it's critical
+            if (adjacentToGroup1 >= 1 && adjacentToGroup2 >= 1) {
+              attackPositions.add(empty1);
+            }
+          }
+
+          // Also check diagonal bridges (empty cells 1 apart that both touch)
+          for (final adj in empty1.adjacentPositions) {
+            if (!board.isValidPosition(adj)) continue;
+            if (!board.isEmpty(adj)) continue;
+            if (group2.boundaryEmpties.contains(adj)) {
+              // empty1 touches group1, adj touches group2, and they're adjacent
+              // Either position could cut the thin bridge
+              attackPositions.add(empty1);
               attackPositions.add(adj);
             }
           }
